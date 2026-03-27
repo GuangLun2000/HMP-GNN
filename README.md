@@ -1,4 +1,6 @@
-# IoA-Attack-GRMP
+# HMP-GNN for Hallucination Immunization
+
+Hallucination Immunization for Multimodal Federated LLMs via Hypergraph Message Passing
 
 ## File Structure
 
