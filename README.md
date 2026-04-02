@@ -1,52 +1,48 @@
-# HMP-GNN for Hallucination Immunization
+# AugMP Attack to Federated LLMs
 
-Hallucination Immunization for Multimodal Federated LLMs via Hypergraph Message Passing
+- Graph Representation Learning Augmented Model Manipulation on Federated Fine-Tuning of LLMs.
+- [Hanlin Cai](https://caihanlin.com/)
+- Submitted to an IEEE Journal.
 
 ## File Structure
 
 ```
-├── README.md                       # Project documentation (this file)
-├── requirements.txt                # Dependencies for the project
-├── main.py                         # Main experiment script: configures and runs FL 
-├── fed_checkpoint.py               # Save global NewsClassifierModel after FL (optional)
-├── decoder_adapters.py             # Pluggable SeqCLS → CausalLM backbone transfer
-├── run_downstream_generation.py    # CLI: load Fed checkpoint, generate on probe JSON
-├── client.py                       # Client logic (BenignClient, AttackerClient/GRMP)
-├── server.py                       # Server: model aggregation and evaluation
-├── models.py                       # Learning model definitions (NewsClassifierModel)
-├── data_loader.py                  # Data loading (AG News, IMDB, DBpedia, Yahoo Answers)
-├── data/financial_probes.json      # 10 finance-style probes (news + question) for downstream gen
-├── data/ag_news_simple_probes.json # 10 short probes: AG News 4-class label + concise explanation (downstream)
-├── data/ag_news_curated_10.json    # 10 real AG News rows (title+text), gold_ag_label / gold_category for eval
-├── scripts/sample_ag_business_probes.py  # Optional: sample 10 AG News Business rows into JSON
-├── visualization.py                # Visualization module: generates figures
-├── attack_baseline_alie.py         # ALIE attack baseline (NeurIPS '19)
-├── attack_baseline_gaussian.py     # Gaussian attack baseline (USENIX Security '20)
-├── attack_baseline_sign_flipping.py# Sign-flipping attack baseline (ICML '18)
-├── GRMP_Attack_Colab.ipynb         # Google Colab notebook for interactive execution
-├── AG_News_Datasets/               # AG News local data (train.csv, test.csv)
-└── Yahoo_Answers_Datasets/         # Yahoo Answers local data (created on first run)
+.
+├── .gitignore
+├── LICENSE
+├── README.md                          # This documentation
+├── requirements.txt                   # Python dependencies
+├── main.py                            # Entry: configure and run federated learning
+├── client.py                          # BenignClient, AttackerClient (GRMP), baselines hook
+├── server.py                          # Aggregation, evaluation, round orchestration
+├── models.py                          # NewsClassifierModel, VGAE, etc.
+├── data_loader.py                     # DataManager / datasets (AG News, Yahoo Answers, IMDB, DBpedia)
+├── fed_checkpoint.py                  # Save global model + metadata after FL
+├── decoder_adapters.py                # SeqCLS backbone → CausalLM transfer adapters
+├── run_downstream_generation.py       # CLI: checkpoint + probes → JSONL (Task 2)
+├── visualization.py                   # Experiment figures / plots
+├── attack_baseline_alie.py            # ALIE baseline (NeurIPS ’19)
+├── attack_baseline_gaussian.py        # Gaussian baseline (USENIX Security ’20)
+├── attack_baseline_sign_flipping.py   # Sign-flipping baseline (ICML ’18)
+├── GRMP_Attack_Colab.ipynb            # Colab-oriented notebook
+└── data/                              # Datasets for Task 1 and Task 2
 ```
 
 ## Supported Models
 
-Encoder-only (BERT-style): `distilbert-base-uncased`, `bert-base-uncased`, `roberta-base`, `microsoft/deberta-v3-base`  
-Decoder-only (GPT-style): `gpt2`, `EleutherAI/pythia-160m`, `EleutherAI/pythia-1b`, `facebook/opt-125m`, `Qwen/Qwen2.5-0.5B`
-
-Configure in `main.py` via `model_name`. Use base models (not Instruct) for classification fine-tuning.
+- Encoder-only (BERT-style): `distilbert-base-uncased`, `bert-base-uncased`, `roberta-base`, `microsoft/deberta-v3-base`
+- Decoder-only (GPT-style): `gpt2`, `EleutherAI/pythia-160m`, `EleutherAI/pythia-1b`, `facebook/opt-125m`, `Qwen/Qwen2.5-0.5B`
+- Configure in `main.py` via `model_name`.
 
 ## Supported Datasets
 
 - **AG News**: `dataset='ag_news'`, `num_labels=4`, `max_length=128` (default)
+- **Yahoo Answers** (yassiracharki/Yahoo_Answers_10_categories_for_NLP): `dataset='yahoo_answers'`, `num_labels=10`, `max_length=256` (10 topic classes, 1.4M train / 60K test)
 - **IMDB** (stanfordnlp/imdb): `dataset='imdb'`, `num_labels=2`, `max_length=512` (or 256 for lower memory)
 - **DBpedia 14** (fancyzhx/dbpedia_14): `dataset='dbpedia'`, `num_labels=14`, `max_length=512` (14 topic classes, 560K train / 70K test)
-- **Yahoo Answers** (yassiracharki/Yahoo_Answers_10_categories_for_NLP): `dataset='yahoo_answers'`, `num_labels=10`, `max_length=256` (10 topic classes, 1.4M train / 60K test)
+- Configure in `main.py` via `dataset`, `num_labels`, and `max_length`.
 
-Configure in `main.py` via `dataset`, `num_labels`, and `max_length`.
-
-**Note on dataset_size_limit**: When `dataset_size_limit` is set, both train and test are limited for faster experimentation: train uses up to `dataset_size_limit` samples, test uses up to `dataset_size_limit × 0.15` samples (same rule for all datasets).
-
-**Local storage**: AG News and Yahoo Answers can be stored locally. AG News uses `AG_News_Datasets/`; Yahoo Answers uses `Yahoo_Answers_Datasets/`. On first run with Yahoo Answers, the dataset is downloaded from Hugging Face and saved to `Yahoo_Answers_Datasets/` for future use (same behavior as AG News).
+<br>
 
 ## Install Dependencies
 
@@ -62,150 +58,48 @@ Configure in `main.py` via `dataset`, `num_labels`, and `max_length`.
 python main.py
 ```
 
-### Save global model checkpoint (for downstream experiments)
-
-After federated training, you can persist `server.global_model` (same `NewsClassifierModel` as during FL).
-
-1. In `main.py` → `config`, set:
-   - `save_global_checkpoint`: `True`
-   - `global_checkpoint_subdir`: optional subfolder under `results/` (default: `global_checkpoint`). Use a unique name per run if multiple experiments share `results/`.
-2. Re-run `python main.py`. Outputs:
-   - `results/<global_checkpoint_subdir>/global_model.pt` — `state_dict` + embedded `metadata`
-   - `results/<global_checkpoint_subdir>/checkpoint_metadata.json` — `model_name`, `num_labels`, `use_lora`, LoRA hyperparameters if applicable
-   - If `use_lora=True`: `results/<global_checkpoint_subdir>/peft_adapter/` — PEFT `save_pretrained` (best-effort)
-3. Optional — **Task 2 in the same run as FL**: in [`main.py`](main.py) → `config`, set **`run_downstream_after_fl`**: `True`. After `save_global_model_checkpoint`, the script runs **`run_downstream_generation.py`** as a subprocess (same working directory as the repo). Related keys: **`downstream_probes`**, **`downstream_output`** (default: `results/<experiment_name>_downstream_gen.jsonl`), **`downstream_device`**, **`downstream_cli_args`** (extra flags such as `--parse-retry-max 2`). Skips with a warning if `global_model.pt` or the probe file is missing.
-
-**FedLLM checkpoint examples:** set `model_name` to `EleutherAI/pythia-160m` or `Qwen/Qwen2.5-0.5B`, with `num_labels` / `dataset` consistent (e.g. AG News: `num_labels=4`), then enable `save_global_checkpoint` as above.
-
-### Downstream causal generation (probe JSON)
-
-Second-stage script loads the Fed **sequence-classification** checkpoint, copies the shared **backbone** into **`AutoModelForCausalLM`** (same HF `model_name`), keeps the **pretrained `lm_head`**, and runs `generate()` on a fixed probe list (no extra training).
-
-**Adapters** ([`decoder_adapters.py`](decoder_adapters.py)): **Qwen2 / Qwen2.5** (`model.*`) and **Pythia / GPT-NeoX** (`gpt_neox.*`).
-
-**Probes**
-
-- [`data/ag_news_curated_10.json`](data/ag_news_curated_10.json) — **real** AG News text with `news_text` = `title + " " + text` (same rule as [`data_loader.py`](data_loader.py)). Each row may include **`gold_ag_label`** (CSV-style **1–4**: 1 World, 2 Sports, 3 Business, 4 Sci/Tech, matching CharCnn AG News) and **`gold_category`** (`"World"` \| `"Sports"` \| `"Business"` \| `"Sci/Tech"`). These gold fields are **not** passed to the model; they are written to JSONL for paper-style comparisons. Recommended with **`--prompt-style strict`**, **`--stable`**, **`--parse-strict-output`**, and **`--write-seq-cls-argmax`**.
-- [`data/ag_news_simple_probes.json`](data/ag_news_simple_probes.json) — short news + instruction to output **(1)** exactly one of World / Sports / Business / Sci/Tech and **(2)** one concise explanation sentence (aligns with AG News `num_labels=4`). Recommended with **`--prompt-style simple`** and **`--stable`** (`--stable` uses `max_new_tokens=64` by default unless you use **`strict`**; see below).
-- [`data/financial_probes.json`](data/financial_probes.json) — finance-themed synthetic snippets (harder for small base LMs).
-
-To sample **AG News Business** lines into JSON, run:
-
-```bash
-python scripts/sample_ag_business_probes.py --csv AG_News_Datasets/train.csv -o data/financial_probes_ag.json
-```
-
-(AG CSV labels: `3` = Business.)
-
-**Stability flags**
-
-- **`--stable`**: greedy decoding; default `max_new_tokens` is **64** for `default` / `simple`, **72** for **`strict`** (two lines + stopping criteria), **96** for **`strict_json`** (override with `--max-new-tokens`). Default `repetition_penalty` is **1.1**, or **1.15** with **`strict`** / **`strict_json`** (unless you set `--repetition-penalty`).
-- **`--write-seq-cls-argmax`**: adds `seq_cls_label_id` / `seq_cls_label` from the **SeqCLS head** (same objective as Fed training) for a reproducible label column next to free-form `completion_*`.
-- **`--prompt-style {default,simple,strict,strict_json}`**: `simple` / `default` as before; **`strict`** uses a **prefix prompt** ending with `Category: ` so the model continues with `<Word>\\nReason: ...`; decoding stops after **two lines** (`StoppingCriteria`). **`strict_json`** asks for one JSON object with `"category"` and `"reason"` keys; decode stops after `}`. **`--strict-few-shot`** adds one in-prompt two-line example ( **`strict` only** ). **`--strict-two-stage`**: short phase A for the category word, then phase B for `Reason:` only (assembled two-line `completion_primary`); **`--reason-only`** fixes category from the SeqCLS head (**requires** **`--write-seq-cls-argmax`**).
-- **`--parse-strict-output`**: parses **`strict`** / two-stage outputs with line rules; parses **`strict_json`** with `json.loads`. Writes **`parsed_category`**, **`parsed_reason`**, **`format_valid`** (lenient), **`format_valid_strict`** (exactly two lines, reason ≤25 words, or valid JSON with word limit), and **`matches_gold_category`** / **`matches_gold_category_strict`** when **`gold_category`** is set.
-- **`--parse-retry-max N`**: for **`strict`**, **`strict_json`**, or **`--strict-two-stage`** only: if the parse criterion is not met, run up to **`N` additional** decodes (so **`N=2`** ⇒ at most **3** generations per probe). Retries use **`do_sample=True`** and **`--parse-retry-temperature`** so outputs can differ from greedy first passes. Success by default requires **`format_valid_strict`**; use **`--parse-retry-lenient`** to stop on **`format_valid`** only. If **`N>0`** with other prompt styles, the flag is ignored (warning). JSONL adds **`parse_retry_max_attempts`**, **`parse_attempts`**, **`parse_retry_exhausted`** when retries are active; with **`--compare-checkpoint`**, the same keys appear with a **`_compare`** suffix for the second model.
-
-**Qwen2.5 + AG News (curated real probes + strict format)** (after saving a checkpoint with `model_name=Qwen/Qwen2.5-0.5B`, `dataset=ag_news`, `num_labels=4`):
-
-```bash
-python run_downstream_generation.py \
-  --checkpoint results/global_checkpoint \
-  --probes data/ag_news_curated_10.json \
-  --output results/downstream_curated.jsonl \
-  --stable \
-  --write-seq-cls-argmax \
-  --prompt-style strict \
-  --parse-strict-output
-```
-
-**Two-stage strict** (category then reason; optional **`--reason-only`** with SeqCLS category — requires **`--write-seq-cls-argmax`**):
-
-```bash
-python run_downstream_generation.py \
-  --checkpoint results/global_checkpoint \
-  --probes data/ag_news_curated_10.json \
-  --output results/downstream_twostage.jsonl \
-  --stable \
-  --write-seq-cls-argmax \
-  --prompt-style strict \
-  --parse-strict-output \
-  --strict-two-stage
-```
-
-**Short synthetic probes** (`ag_news_simple_probes.json` + `simple` template):
-
-```bash
-python run_downstream_generation.py \
-  --checkpoint results/global_checkpoint \
-  --probes data/ag_news_simple_probes.json \
-  --output results/downstream_gen.jsonl \
-  --stable \
-  --write-seq-cls-argmax \
-  --prompt-style simple
-```
-
-**Single checkpoint** (legacy defaults: sampling, up to 128 new tokens):
-
-```bash
-python run_downstream_generation.py \
-  --checkpoint results/global_checkpoint \
-  --probes data/financial_probes.json \
-  --output results/downstream_gen.jsonl \
-  --max-new-tokens 128
-```
-
-**Paired clean vs poisoned** (same probes, two checkpoints):
-
-```bash
-python run_downstream_generation.py \
-  --checkpoint results/global_checkpoint \
-  --compare-checkpoint results_baseline/global_checkpoint \
-  --probes data/ag_news_simple_probes.json \
-  --output results/downstream_compare.jsonl \
-  --stable \
-  --write-seq-cls-argmax \
-  --prompt-style simple
-```
-
-JSONL fields: `probe_id`, `news_text`, `question`, `prompt_style`, `completion_primary`; optional `gold_ag_label`, `gold_category` when present in the probe JSON; with `--compare-checkpoint`, also `completion_compare` and `seq_cls_compare_*`; with `--write-seq-cls-argmax`, also `seq_cls_label_id`, `seq_cls_label`; with **`--parse-strict-output`**, also `parsed_category`, `parsed_reason`, `format_valid`, `format_valid_strict`, `matches_gold_category`, `matches_gold_category_strict` when applicable. Use `--greedy` for greedy decoding without full `--stable`; `--base-model` overrides the HF id for CausalLM/tokenizer (only if it matches the saved architecture).
-
-**Evaluation tip**: report both **`format_valid`** (anywhere in text) and **`format_valid_strict`** (anchored two-line / JSON + word cap) to separate “parsable” from “fully compliant” outputs.
-
-**Parse retry note**: under **`--stable`**, the first attempt stays greedy; without retries, repeating generation would often duplicate the same text. After a failed parse, retries intentionally use sampling—tune **`--parse-retry-temperature`** if outputs are too noisy.
-
-### Adding another decoder family
-
-1. Subclass `DecoderAdapter` in [`decoder_adapters.py`](decoder_adapters.py) and implement `matches(model_name)` and `transfer_backbone(seq_cls_inner, causal_lm)`.
-2. Append the class to `ADAPTER_REGISTRY` (list order = match priority).
-3. Run `run_downstream_generation.py` with checkpoints trained on that `model_name`.
-
-### Google Colab Execution
+### Google Colab Execution (or other Cloud AI platforms)
 
 **Option 1: Simple Version (Recommended for quick runs)**
+
 ```python
 # Cell 1: Install dependencies
-!git clone https://github.com/GuangLun2000/IoA-Attack-GRMP.git
-!pip install -r ./IoA-Attack-GRMP/requirements.txt
+!git clone https://github.com/GuangLun2000/AugMP-Attack.git
+!pip install -r ./AugMP-Attack/requirements.txt
 
 # Cell 2: Run experiment
 
-!cd ./IoA-Attack-GRMP && python main.py
+!cd ./AugMP-Attack && python main.py
 ```
 
 **Option 2: Interactive Notebook (Recommended for configuration changes)**
+
 1. Open `GRMP_Attack_Colab.ipynb` in Google Colab
 2. Enable GPU: Runtime → Change runtime type → GPU
 3. Run all cells: Runtime → Run all
 
-## Citation
+<br>
 
-If this repository has been helpful to you, please consider citing our work in your paper. Thank you so much!
+---
 
-```latex
-@article{cai2025graph,
-  title={Graph Representation-based Model Poisoning on the Heterogeneous Internet of Agents},
-  author={Cai, Hanlin and Wang, Houtianfu and Dong, Haofan and Li, Kai and Akan, Ozgur B},
-  journal={arXiv preprint arXiv:2511.07176},
-  year={2025}
-}
+### Checkpoints and Task 2 (downstream generation)
+
+In [`main.py`](main.py) → `config`, turn on **`save_global_checkpoint`** and optionally **`global_checkpoint_subdir`** (under `results/`). You get `global_model.pt`, `checkpoint_metadata.json`, and with LoRA a **`peft_adapter/`** folder. Train with a causal **`model_name`** that matches **`num_labels`** / **`dataset`** (e.g. AG News + Pythia or Qwen2.5 as in **Supported Models**).
+
+**Task 2** classifies each probe with the saved SeqCLS head, copies the backbone into **`AutoModelForCausalLM`** (no LM fine-tuning), and decodes a short explanation. AG News labels: 0–3 → World, Sports, Business, Sci/Tech. Backbone wiring lives in [`decoder_adapters.py`](decoder_adapters.py). Default probes: [`data/ag_news_business_30.json`](data/ag_news_business_30.json).
+
+To chain after FL, set **`run_downstream_after_fl`**: `True` (plus `downstream_probes`, `downstream_output`, `downstream_cli_args`, …). Or run the CLI:
+
+```bash
+python run_downstream_generation.py \
+  --checkpoint results/global_checkpoint \
+  --probes data/ag_news_business_30.json \
+  --output results/downstream_gen.jsonl \
+  --stable
 ```
+
+`--stable` is a conservative greedy preset; use **`--help`** for decoding flags. Each output line is JSONL (labels + text); compare predictions to ground-truth categories and read the rationale fields to study poisoning.
+
+**Other decoder families:** implement `DecoderAdapter` (`matches`, `transfer_backbone`), append to **`ADAPTER_REGISTRY`** in [`decoder_adapters.py`](decoder_adapters.py), then point Task 2 at checkpoints with the same **`model_name`**.
+
+<br>
