@@ -1,8 +1,7 @@
-# AugMP Attack to Federated LLMs
+# HMP-GNN
 
-- Graph Representation Learning Augmented Model Manipulation on Federated Fine-Tuning of LLMs.
+- Hallucination Immunization for Multimodal Federated LLMs via Hypergraph Message Passing.
 - [Hanlin Cai](https://caihanlin.com/)
-- Submitted to an IEEE Journal.
 
 ## File Structure
 
@@ -64,12 +63,12 @@ python main.py
 
 ```python
 # Cell 1: Install dependencies
-!git clone https://github.com/GuangLun2000/AugMP-Attack.git
-!pip install -r ./AugMP-Attack/requirements.txt
+!git clone https://github.com/GuangLun2000/HMP-GNN.git
+!pip install -r ./HMP-GNN/requirements.txt
 
 # Cell 2: Run experiment
 
-!cd ./AugMP-Attack && python main.py
+!cd ./HMP-GNN && python main.py
 ```
 
 **Option 2: Interactive Notebook (Recommended for configuration changes)**
