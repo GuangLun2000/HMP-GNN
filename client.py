@@ -138,19 +138,19 @@ class BenignClient(Client):
     def local_train(self, epochs: Optional[int] = None) -> torch.Tensor:
         """
         Run FedProx local training for ``epochs`` (defaults to ``self.local_epochs``).
-
+        
         Returns the model update ``Delta = w_local - w_global`` (on CPU).
         """
         if epochs is None:
             epochs = self.local_epochs
-
+            
         if not self._model_on_gpu:
             self.model.to(self.device)
             self._model_on_gpu = True
             if self.optimizer is None:
                 trainable_params = [p for p in self.model.parameters() if p.requires_grad]
                 self.optimizer = optim.Adam(trainable_params, lr=self.lr)
-
+            
         self.model.train()
         initial_params = self.model.get_flat_params().clone().cpu()
         mu = self.alpha
@@ -168,14 +168,14 @@ class BenignClient(Client):
 
                 logits = self.model(input_ids, attention_mask)
                 ce_loss = nn.CrossEntropyLoss()(logits, labels)
-
+                
                 current_params = self.model.get_flat_params(requires_grad=True)
                 initial_params_gpu = initial_params.to(self.device)
                 proximal_term = (mu / 2.0) * torch.norm(current_params - initial_params_gpu) ** 2
                 initial_params_gpu = None  # release reference
-
+                
                 loss = ce_loss + proximal_term
-
+                
                 if not torch.isfinite(loss).item():
                     # Skip non-finite batches to avoid corrupting the model.
                     import warnings
@@ -185,7 +185,7 @@ class BenignClient(Client):
                     )
                     pbar.set_postfix({"loss": "nan(skip)"})
                     continue
-
+                
                 self.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -195,15 +195,15 @@ class BenignClient(Client):
                 pbar.set_postfix({"loss": loss.item()})
 
         update = self.get_model_update(initial_params)
-
+        
         # Release GPU memory between clients to keep peak usage bounded.
         self.model.cpu()
         self._model_on_gpu = False
         del self.optimizer
         self.optimizer = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
+            if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
         return update
 
     def receive_benign_updates(self, updates: List[torch.Tensor]) -> None:

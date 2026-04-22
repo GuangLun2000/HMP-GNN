@@ -35,9 +35,10 @@
 │   ├── trust_scorer.py                #   closed-form trust -> alpha_i
 │   └── runtime.py                     #   end-to-end HMPGAERuntime
 ├── run_demo.py                        # Entry: run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + all 4 figures
-├── HMP_GAE_Colab.ipynb                # Google Colab one-click demo notebook
-└── data/                              # Datasets for Task 1 and Task 2
+└── HMP_GAE_Colab.ipynb                # Google Colab one-click demo notebook
 ```
+
+There is no committed `data/` directory: **Task 1** loads AG News (etc.) from the network or from optional root `train.csv` / `test.csv` (see `data_loader.py`). **Task 2** requires a probe list JSON path you provide (`--probes` / `downstream_probes`).
 
 ## Supported Models
 
@@ -71,17 +72,14 @@ python main.py
 
 ### Google Colab Execution (or other Cloud AI platforms)
 
-**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb) in Google Colab, set **Runtime → Change runtime type → T4 GPU**, then **Runtime → Run all**. The full V1 demo (3 experiments + 2 figures) finishes in **~10 minutes** on a free T4.
+**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb), enable **T4 GPU**, then **Run all**. Experiment **hyperparameters** come from [`main.py`](main.py) (`main()` 中的 `config`); the notebook may set optional **`COLAB_CONFIG_OVERRIDES`** to merge a few keys without editing the file (same idea as the GRMP Colab). The primary cell runs `main.main(...)`; an optional later cell runs `run_demo.py` for the three-scenario Fig A / C / E / F bundle. The last cell calls **`google.colab.runtime.unassign()`** to release the GPU. Wall-clock time depends on `main.py` (e.g. Qwen2.5 + 10 rounds is much longer than a small DistilBERT demo).
 
-**Alternative: pure shell version.**
+**Alternative: pure shell (quick three-run demo).**
 
 ```python
-# Cell 1: Install
 !git clone https://github.com/GuangLun2000/HMP-GNN.git
 %cd HMP-GNN
 !pip install -q -r requirements.txt
-
-# Cell 2: Run the demo
 !python run_demo.py
 ```
 
@@ -93,14 +91,14 @@ python main.py
 
 In [`main.py`](main.py) → `config`, turn on **`save_global_checkpoint`** and optionally **`global_checkpoint_subdir`** (under `results/`). You get `global_model.pt`, `checkpoint_metadata.json`, and with LoRA a **`peft_adapter/`** folder. Train with a causal **`model_name`** that matches **`num_labels`** / **`dataset`** (e.g. AG News + Pythia or Qwen2.5 as in **Supported Models**).
 
-**Task 2** classifies each probe with the saved SeqCLS head, copies the backbone into **`AutoModelForCausalLM`** (no LM fine-tuning), and decodes a short explanation. AG News labels: 0–3 → World, Sports, Business, Sci/Tech. Backbone wiring lives in [`decoder_adapters.py`](decoder_adapters.py). Default probes: [`data/ag_news_business_30.json`](data/ag_news_business_30.json).
+**Task 2** classifies each probe with the saved SeqCLS head, copies the backbone into **`AutoModelForCausalLM`** (no LM fine-tuning), and decodes a short explanation. AG News labels: 0–3 → World, Sports, Business, Sci/Tech. Backbone wiring lives in [`decoder_adapters.py`](decoder_adapters.py). Prepare your own probe JSON (list of objects with at least `news_text`; optional `id`, `question`, label fields as in the script’s `load_probes`).
 
-To chain after FL, set **`run_downstream_after_fl`**: `True` (plus `downstream_probes`, `downstream_output`, `downstream_cli_args`, …). Or run the CLI:
+To chain after FL, set **`run_downstream_after_fl`**: `True` and a non-None **`downstream_probes`** path (plus `downstream_output`, `downstream_cli_args`, …). Or run the CLI:
 
 ```bash
 python run_downstream_generation.py \
   --checkpoint results/global_checkpoint \
-  --probes data/ag_news_business_30.json \
+  --probes /path/to/your_probes.json \
   --output results/downstream_gen.jsonl \
   --stable
 ```

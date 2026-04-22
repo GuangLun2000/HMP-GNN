@@ -431,7 +431,14 @@ def run_downstream_task2_if_configured(config: Dict, results_dir: Path) -> None:
         )
         return
 
-    probes = Path(config.get("downstream_probes", "data/ag_news_curated_10.json"))
+    probes_cfg = config.get("downstream_probes")
+    if not probes_cfg:
+        print(
+            "\n⚠️  Task 2 skipped: set config['downstream_probes'] to a probe JSON path "
+            "(FL training does not need a `data/` folder; datasets are downloaded or use root train.csv / AG_News_Datasets/)."
+        )
+        return
+    probes = Path(probes_cfg)
     if not probes.is_file():
         print(f"\n⚠️  Task 2 skipped: probes file not found: {probes}")
         return
@@ -1031,7 +1038,7 @@ def main(config_overrides: Optional[Dict] = None):
         # additional explanatory output. Keep off for a faster first run (saves ~2-3 min); switch
         # to True if you want the per-probe JSONL explanations side-by-side.
         'run_downstream_after_fl': False,  # True: subprocess run_downstream_generation.py after checkpoint save
-        'downstream_probes': 'data/ag_news_business_30.json',  # Probe JSON path (relative to repo root / cwd)
+        'downstream_probes': None,  # e.g. Path to probe JSON; None skips Task 2 (no repo `data/` required)
         'downstream_output': None,  # None -> results/<experiment_name>_downstream_gen.jsonl; else path (relative to results/ if not absolute)
         'downstream_device': None,  # None -> cuda if available else cpu
         # Extra CLI tokens for run_downstream_generation.py (SeqCLS classify + CausalLM explain)
