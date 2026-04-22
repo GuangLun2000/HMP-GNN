@@ -35,7 +35,7 @@
 │   ├── trust_scorer.py                #   closed-form trust -> alpha_i
 │   └── runtime.py                     #   end-to-end HMPGAERuntime
 ├── run_demo.py                        # Entry: run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + all 4 figures
-└── HMP_GAE_Colab.ipynb                # Google Colab one-click demo notebook
+└── HMP_GAE_Colab.ipynb                # Colab: main experiment + full inline results; then disconnect GPU
 ```
 
 There is no committed `data/` directory: **Task 1** loads AG News (etc.) from the network or from optional root `train.csv` / `test.csv` (see `data_loader.py`). **Task 2** requires a probe list JSON path you provide (`--probes` / `downstream_probes`).
@@ -72,7 +72,7 @@ python main.py
 
 ### Google Colab Execution (or other Cloud AI platforms)
 
-**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb), enable **T4 GPU**, then **Run all**. Experiment **hyperparameters** come from [`main.py`](main.py) (`main()` 中的 `config`); the notebook may set optional **`COLAB_CONFIG_OVERRIDES`** to merge a few keys without editing the file (same idea as the GRMP Colab). The primary cell runs `main.main(...)`; an optional later cell runs `run_demo.py` for the three-scenario Fig A / C / E / F bundle. The last cell calls **`google.colab.runtime.unassign()`** to release the GPU. Wall-clock time depends on `main.py` (e.g. Qwen2.5 + 10 rounds is much longer than a small DistilBERT demo).
+**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb), enable **T4 GPU**, then **Run all**. It runs **`main.main(...)`** only (same `config` as [`main.py`](main.py), plus optional **`COLAB_CONFIG_OVERRIDES`**) and prints the full `*_results.json` / PPL / per-round tables inline. The last cell calls **`google.colab.runtime.unassign()`** to release the GPU. For the separate **quick three-scenario** script (Fig A / C / E / F on `run_demo` settings), use **`run_demo.py`** in the shell or locally — not the Colab notebook. Wall-clock time follows `main.py` (e.g. Qwen2.5 + 10 rounds is long).
 
 **Alternative: pure shell (quick three-run demo).**
 
