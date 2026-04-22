@@ -34,8 +34,7 @@
 │   ├── losses.py                      #   BCE(H,H_hat) + smoothness + hist
 │   ├── trust_scorer.py                #   closed-form trust -> alpha_i
 │   └── runtime.py                     #   end-to-end HMPGAERuntime
-├── _v1_demo_run.py                    # Run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + figures
-├── _v1_seed_runs.py                   # 3-seed validation sweep for mean +/- std
+├── run_demo.py                        # Entry: run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + all 4 figures
 ├── HMP_GAE_Colab.ipynb                # Google Colab one-click demo notebook
 └── data/                              # Datasets for Task 1 and Task 2
 ```
@@ -83,7 +82,7 @@ python main.py
 !pip install -q -r requirements.txt
 
 # Cell 2: Run the demo
-!python _v1_demo_run.py
+!python run_demo.py
 ```
 
 <br>
@@ -147,11 +146,8 @@ V1 ships the paper's core immunization pipeline end-to-end:
 ### V1 demo: end-to-end verification
 
 ```bash
-# Single demo run: NoAttack / Hallu+FedAvg / Hallu+HMP-GAE, produces Fig A and Fig C
-python _v1_demo_run.py
-
-# 3-seed sweep (M6 validation): mean +/- std of final clean accuracy
-python _v1_seed_runs.py
+# End-to-end demo: NoAttack / Hallu+FedAvg / Hallu+HMP-GAE, produces all 4 figures
+python run_demo.py
 ```
 
 Representative V1 demo numbers (N=10 clients, 2 attackers, 3 rounds, AG News subset, DistilBERT + LoRA):
@@ -181,18 +177,12 @@ Config knobs (already in [main.py](main.py)):
 'ppl_max_length': None,                          # None -> reuse config['max_length']
 ```
 
-Output files per run (the `results/` folder is gitignored -- everything below is produced by running `_v1_demo_run.py` or `_v1_seed_runs.py` locally / on Colab):
+Output files per run (the `results/` folder is gitignored -- everything below is produced by running `run_demo.py` locally / on Colab):
 
 - `results/<exp>_results.json` -- adds `progressive_metrics.cse` (per-round CSE list) and per-round `classification_semantic_entropy` in each `round_log`.
 - `results/<exp>_eval_ppl.json` -- dict with `ppl_mean`, `ppl_per_class`, `n_samples`, `mean_nll`.
 - `results/_v1_demo/figA_defense_bar.{png,pdf}` and `figC_trust_evolution.{png,pdf}` -- V1 core figures.
 - `results/_v1_demo/figE_metrics_grouped.{png,pdf}` and `figF_cse_evolution.{png,pdf}` -- V2 M7 three-metric bar + CSE evolution.
-
-Paper-ready outputs from `python _v1_seed_runs.py` (3-seed sweep):
-
-- `results/_v1_seed_runs/table_I.csv` -- ready-for-paper Table I with `mean ± std` for Accuracy, CSE, and PPL per defense.
-- `results/_v1_seed_runs/figE_metrics_grouped.pdf` -- three-panel bar chart: Accuracy (higher better), CSE (lower better), PPL (lower better).
-- `results/_v1_seed_runs/figF_cse_evolution.pdf` -- per-round CSE curve (FedAvg vs HMP-GAE) from the first seed.
 
 ### V1 / V2 limitations and roadmap
 

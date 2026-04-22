@@ -1,10 +1,19 @@
 """
-V1 demo runner: produce Fig A (attack-vs-defense bar) and Fig C (trust weight
-evolution) from 3 tiny FL experiments.
+End-to-end demo runner.
 
-This script is intentionally standalone (not wired into main's CLI). It is
-meant for the M5 acceptance check; longer-form experiments for the paper
-should use a dedicated batch runner in V2.
+Runs three comparable FL experiments back-to-back and produces every
+paper-grade figure (Fig A / C / E / F) under ``results/_v1_demo/``:
+
+    1. No Attack            - clean federated-learning baseline
+    2. Hallu + FedAvg       - vanilla aggregation under hallucination attack
+    3. Hallu + HMP-GAE      - our defense under the same attack
+
+Each run also writes its own results JSON (including per-round CSE) and
+optional PPL JSON (end-of-FL, decoder-only models only).
+
+This is the primary reproducibility entry point called from
+``HMP_GAE_Colab.ipynb`` and referenced in the README. Safe to re-run; all
+outputs are overwritten in place.
 """
 
 from __future__ import annotations

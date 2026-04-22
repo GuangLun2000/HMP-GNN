@@ -862,20 +862,23 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        'experiment_name': 'vgae_grmp_attack',  # Name for result files and logs
+        # V1 first experiment: HMP-GAE defense vs Hallucination attack, N=10 (8 benign + 2 attackers), 10 rounds.
+        # For a FedAvg baseline comparison, override via:
+        #     python -c "import main; main.main({'experiment_name':'fedavg_hallu_n10_10r','defense_method':'fedavg'})"
+        'experiment_name': 'hmpgae_hallu_n10_10r',
         'seed': 42069,  # Random seed for reproducibility (int), 42 is the default
-        
+
         # ========== Federated Learning Setup ==========
         'num_clients': 10,  # Total number of federated learning clients (int)
         'num_attackers': 2,  # Number of attacker clients (int, must be < num_clients)
-        'num_rounds': 5,  # Total number of federated learning rounds (int)
-        
+        'num_rounds': 10,    # Total number of federated learning rounds (int)
+
         # ========== Training Hyperparameters ==========
-        'client_lr': 5e-5,  # Learning rate for local client training (float)
-        'server_lr': 1.0,  # Server learning rate for model aggregation (fixed at 1.0)
-        'batch_size': 128,  # Batch size for local training (int)
-        'test_batch_size': 256,  # Batch size for test/validation data loaders (int)
-        'local_epochs': 2,  # Number of local training epochs per round (int, per paper Section IV)
+        'client_lr': 5e-5,   # Learning rate for local client training (float)
+        'server_lr': 1.0,    # Server learning rate for model aggregation (fixed at 1.0)
+        'batch_size': 64,    # Batch size for local training. 64 is safer on a 15GB T4 with Qwen2.5-0.5B + seq_len=128. Raise to 128 on larger GPUs.
+        'test_batch_size': 128,  # Batch size for test/validation data loaders (int)
+        'local_epochs': 2,   # Number of local training epochs per round (int, per paper Section IV)
         'grad_clip_norm': 1.0,  # Benign client grad clipping. Decoder models: Pythia-160m try 0.5 if nan; Qwen2.5-0.5B typically stable at 1.0
         'alpha': 0.0,  # FedProx proximal coefficient μ: loss += (μ/2)*||w - w_global||². Set 0 for standard FedAvg, >0 to penalize local drift from global model (helps Non-IID stability)
         
@@ -902,8 +905,10 @@ def main(config_overrides: Optional[Dict] = None):
         # 'max_length': 128,      # Yahoo Answers: 256 (Q&A text, similar length to AG News)
         
         # ========== Data Distribution ==========
-        'data_distribution': 'non-iid',  # 'iid' for uniform random, 'non-iid' for Dirichlet-based heterogeneous distribution
-        'dirichlet_alpha': 0.3,  # Only used when data_distribution='non-iid'. Lower = more heterogeneous, higher = more balanced
+        # For V1 first experiment we use IID to isolate the defense effect from data heterogeneity noise.
+        # Switch to 'non-iid' with dirichlet_alpha in [0.3, 1.0] once baseline numbers are stable.
+        'data_distribution': 'iid',      # 'iid' uniform, 'non-iid' Dirichlet-heterogeneous
+        'dirichlet_alpha': 0.3,          # Only used when data_distribution='non-iid'. Lower = more heterogeneous.
         # 'dataset_size_limit': None,  # Limit dataset size (None = full dataset). AG News: ~120K; IMDB: 25K; DBpedia: 560K; Yahoo Answers: 1.4M
         'dataset_size_limit': 20000,  # Limit for faster experimentation. When set: train ≤ limit, test ≤ limit × 0.15 (same rule for all datasets)
 
@@ -957,7 +962,7 @@ def main(config_overrides: Optional[Dict] = None):
         # defense_method selects the server-side aggregation rule.
         #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
-        'defense_method': 'fedavg',
+        'defense_method': 'hmp_gae',
         'defense_config': {
             # --- Node features (eta_i) ---
             'proj_dim': 64,              # random-projection dim for flat update
@@ -1022,7 +1027,10 @@ def main(config_overrides: Optional[Dict] = None):
         'save_global_checkpoint': True,  # True: save server.global_model after FL under results_dir/global_checkpoint_subdir
         'global_checkpoint_subdir': 'global_checkpoint',  # Subfolder name under results/ (same run uses results_dir from setup)
         # ========== Task 2: optional downstream causal generation (same run as FL) ==========
-        'run_downstream_after_fl': True,  # True: subprocess run_downstream_generation.py after checkpoint save
+        # V1 first experiment has PPL + CSE as hallucination metrics already; Task 2 generation is
+        # additional explanatory output. Keep off for a faster first run (saves ~2-3 min); switch
+        # to True if you want the per-probe JSONL explanations side-by-side.
+        'run_downstream_after_fl': False,  # True: subprocess run_downstream_generation.py after checkpoint save
         'downstream_probes': 'data/ag_news_business_30.json',  # Probe JSON path (relative to repo root / cwd)
         'downstream_output': None,  # None -> results/<experiment_name>_downstream_gen.jsonl; else path (relative to results/ if not absolute)
         'downstream_device': None,  # None -> cuda if available else cpu
