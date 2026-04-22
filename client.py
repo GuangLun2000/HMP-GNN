@@ -201,9 +201,9 @@ class BenignClient(Client):
         self._model_on_gpu = False
         del self.optimizer
         self.optimizer = None
-            if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return update
 
     def receive_benign_updates(self, updates: List[torch.Tensor]) -> None:
