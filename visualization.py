@@ -5,7 +5,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import json
 
 # Set style for IEEE publication-quality figures
@@ -826,3 +826,173 @@ class ExperimentVisualizer:
         print("\n✅ All available figures generated successfully!")
         print(f"   Output directory: {self.results_dir}")
 
+
+# --------------------------------------------------------------------------- #
+# HMP-GAE dedicated figures (V1: trust evolution + attack-vs-defense bar)     #
+# --------------------------------------------------------------------------- #
+
+def plot_trust_weight_evolution(server_log_data, attacker_ids, save_path,
+                                 num_clients=None, title_suffix=""):
+    """
+    Fig C: per-client trust weight alpha_i over rounds.
+
+    Benign clients are drawn in blue-ish IEEE palette; attacker clients in red.
+    If ``trust_weights`` is missing from a round (e.g. pre-V1 run) that round
+    is skipped for plotting.
+    """
+    rounds = []
+    weights_by_client: Dict[int, List[float]] = {}
+
+    for log in server_log_data:
+        rnd = log.get('round')
+        agg = log.get('aggregation', {})
+        tw = agg.get('trust_weights', None) if isinstance(agg, dict) else None
+        accepted = agg.get('accepted_clients', []) if isinstance(agg, dict) else []
+        if tw is None or not accepted or len(tw) != len(accepted):
+            continue
+        rounds.append(int(rnd))
+        for cid, w in zip(accepted, tw):
+            weights_by_client.setdefault(int(cid), []).append(float(w))
+
+    if not rounds:
+        print("  ⚠️  plot_trust_weight_evolution: no trust_weights in log; skipping.")
+        return
+
+    # Ensure every client's list has same length as rounds (pad with last val)
+    n_rounds = len(rounds)
+    for cid, w in list(weights_by_client.items()):
+        if len(w) < n_rounds:
+            w = w + [w[-1] if w else 0.0] * (n_rounds - len(w))
+        weights_by_client[cid] = w[:n_rounds]
+
+    all_cids = sorted(weights_by_client.keys())
+    N = num_clients if num_clients is not None else len(all_cids)
+    attackers = set(int(a) for a in (attacker_ids or []))
+    uniform = 1.0 / max(1, N)
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.0))
+
+    benign_colors = IEEE_COLORS['benign']
+    attacker_colors = IEEE_COLORS['attacker']
+    benign_markers = IEEE_MARKERS['benign']
+    attacker_markers = IEEE_MARKERS['attacker']
+
+    bi, ai = 0, 0
+    for cid in all_cids:
+        ys = weights_by_client[cid]
+        if cid in attackers:
+            ax.plot(rounds, ys,
+                    color=attacker_colors[ai % len(attacker_colors)],
+                    marker=attacker_markers[ai % len(attacker_markers)],
+                    markersize=5, linewidth=1.6,
+                    label=f'Attacker {cid}')
+            ai += 1
+        else:
+            ax.plot(rounds, ys,
+                    color=benign_colors[bi % len(benign_colors)],
+                    marker=benign_markers[bi % len(benign_markers)],
+                    markersize=4, linewidth=1.2,
+                    label=f'Benign {cid}')
+            bi += 1
+
+    ax.axhline(uniform, linestyle='--', linewidth=1.0, color='gray',
+               label=f'Uniform 1/N={uniform:.3f}')
+    ax.set_xlabel('Communication Round')
+    ax.set_ylabel(r'Trust Weight $\alpha_i$')
+    title = 'HMP-GAE Trust Weight Evolution'
+    if title_suffix:
+        title += f' ({title_suffix})'
+    ax.set_title(title)
+    ax.set_ylim(-0.02, max(0.5, ax.get_ylim()[1]))
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='center left', bbox_to_anchor=(1.01, 0.5),
+              fontsize=8, ncol=1, frameon=True)
+    fig.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, bbox_inches='tight', dpi=300)
+    pdf_path = save_path.with_suffix('.pdf')
+    fig.savefig(pdf_path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  ✅ Trust-weight evolution saved to: {save_path} (+ .pdf)")
+
+
+def plot_defense_acc_bar(results_by_defense: Dict[str, Dict[str, Any]],
+                         save_path,
+                         metric_key: str = 'final_clean_acc',
+                         attack_label: str = 'Hallucination Attack',
+                         include_no_attack: bool = True):
+    """
+    Fig A: final clean accuracy grouped by defense method.
+
+    Args:
+        results_by_defense: mapping label -> dict with at least metric_key.
+            Example:
+                {
+                    'No Attack':          {'final_clean_acc': 0.84, 'acc_std': 0.01},
+                    'Hallu + FedAvg':     {'final_clean_acc': 0.72, 'acc_std': 0.02},
+                    'Hallu + HMP-GAE':    {'final_clean_acc': 0.82, 'acc_std': 0.01},
+                }
+        save_path: output path; PDF twin is saved alongside.
+        metric_key: field to read from each value dict.
+        attack_label: descriptor for x-label context.
+    """
+    labels = list(results_by_defense.keys())
+    values = [float(results_by_defense[k].get(metric_key, 0.0)) for k in labels]
+    errs = [float(results_by_defense[k].get('acc_std', 0.0)) for k in labels]
+
+    fig, ax = plt.subplots(figsize=(6.0, 4.0))
+    colors = []
+    for lbl in labels:
+        l = lbl.lower()
+        if 'hmp' in l:
+            colors.append('#0B6E4F')      # deep green for ours
+        elif 'fedavg' in l or 'no defense' in l:
+            colors.append('#C0392B')      # red for baseline under attack
+        elif 'no attack' in l or 'clean' in l:
+            colors.append('#2E75B6')      # blue for clean
+        else:
+            colors.append('#7F7F7F')
+
+    xs = np.arange(len(labels))
+    bars = ax.bar(xs, values, yerr=errs if any(e > 0 for e in errs) else None,
+                  capsize=3, color=colors, edgecolor='black', linewidth=0.8)
+
+    for b, v in zip(bars, values):
+        ax.text(b.get_x() + b.get_width() / 2, v + 0.005,
+                f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=15, ha='right')
+    ax.set_ylabel('Final Clean Accuracy')
+    ax.set_title(f'Defense Effectiveness under {attack_label}')
+    ax.set_ylim(0, max(1.0, max(values) * 1.15))
+    ax.grid(True, axis='y', alpha=0.3)
+    fig.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, bbox_inches='tight', dpi=300)
+    pdf_path = save_path.with_suffix('.pdf')
+    fig.savefig(pdf_path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  ✅ Defense accuracy bar saved to: {save_path} (+ .pdf)")
+
+
+def summarize_run_for_fig_a(results_json_path, default_label='run') -> Dict[str, Any]:
+    """
+    Read a single `<exp>_results.json` and extract the final clean accuracy
+    plus a couple of useful numbers for Fig A.
+    """
+    p = Path(results_json_path)
+    with open(p, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    pm = data.get('progressive_metrics', {})
+    accs = pm.get('clean_acc', [])
+    final_acc = float(accs[-1]) if accs else 0.0
+    best_acc = float(max(accs)) if accs else 0.0
+    return {
+        'final_clean_acc': final_acc,
+        'best_clean_acc': best_acc,
+        'label': default_label,
+        'acc_std': 0.0,
+    }

@@ -203,7 +203,10 @@ def setup_experiment(config):
         total_rounds=config['num_rounds'],
         server_lr=config['server_lr'],
         dist_bound=config.get('dist_bound', config.get('d_T', 0.5)),  # Renamed from d_T
-        similarity_mode=config.get('server_similarity_mode', 'local_vs_global')
+        similarity_mode=config.get('server_similarity_mode', 'local_vs_global'),
+        defense_method=config.get('defense_method', 'fedavg'),
+        defense_config=config.get('defense_config', None),
+        num_clients=config['num_clients'],
     )
     # Manual cosine similarity bounds (None = use benign min/max)
     server.sim_bound_low = config.get('sim_bound_low', None)
@@ -308,6 +311,36 @@ def setup_experiment(config):
                     attack_start_round=sign_flip_attack_start_round,
                     claimed_data_size=claimed_data_size,
                     grad_clip_norm=config.get('grad_clip_norm', 1.0)
+                )
+            elif attack_method == 'Hallucination':
+                # ========== Hallucination Attack (Label-Flipping, this paper) ==========
+                from attack_baseline_hallucination import HallucinationAttackerClient
+                print(f"  Client {client_id}: ATTACKER (Hallucination Attack - Label Flipping)")
+                print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
+                client_texts_h = [data_manager.train_texts[i] for i in client_indices[client_id]]
+                client_labels_h = [data_manager.train_labels[i] for i in client_indices[client_id]]
+                dataset_h = NewsDataset(client_texts_h, client_labels_h, data_manager.tokenizer,
+                                        max_length=config.get('max_length', 128))
+                client_loader_h = DataLoader(dataset_h, batch_size=config['batch_size'], shuffle=True)
+                hallu_flip_map = config.get('hallu_flip_map', {0: 1, 1: 0, 2: 3, 3: 2})
+                # Keys may be strings if config is loaded from JSON; normalize to int.
+                hallu_flip_map = {int(k): int(v) for k, v in hallu_flip_map.items()}
+                client = HallucinationAttackerClient(
+                    client_id=client_id,
+                    model=global_model,
+                    data_loader=client_loader_h,
+                    lr=config['client_lr'],
+                    local_epochs=config['local_epochs'],
+                    alpha=config['alpha'],
+                    data_indices=client_indices[client_id],
+                    grad_clip_norm=config.get('grad_clip_norm', 1.0),
+                    flip_ratio=float(config.get('hallu_flip_ratio', 1.0)),
+                    flip_mode=str(config.get('hallu_flip_mode', 'pairwise')),
+                    flip_map=hallu_flip_map,
+                    num_labels=config.get('num_labels', 4),
+                    target_class=config.get('hallu_target_class', None),
+                    attack_start_round=int(config.get('hallu_attack_start_round', 0)),
+                    claimed_data_size=claimed_data_size,
                 )
             elif attack_method == 'Gaussian':
                 # ========== Gaussian (Random Model Poisoning) Attack - USENIX Security '20 ==========
@@ -931,6 +964,16 @@ def main(config_overrides: Optional[Dict] = None):
         'gaussian_attack_start_round': None,  # USENIX Security '20: Round to start Gaussian attack (None = start immediately)
         'gaussian_std_scale': 5.0,  # Scale factor for noise std: attack_vec ~ N(mean, (scale*std)²). scale>1 expands noise to increase impact (FedAvg). 1.0=original Fang et al.
 
+        # ========== Hallucination Attack Parameters (only used when attack_method='Hallucination') ==========
+        # Label-flipping-based hallucination attacker (this paper). Matches threat model:
+        # ||omega_a - omega'_a|| <= eps is satisfied naturally because attacker still
+        # performs standard FedProx local training -- only its training labels are flipped.
+        'hallu_flip_ratio': 1.0,                   # fraction of samples whose labels are flipped
+        'hallu_flip_mode': 'pairwise',             # 'pairwise' | 'targeted' | 'random'
+        'hallu_flip_map': {0: 1, 1: 0, 2: 3, 3: 2},  # AG News: World<->Sports, Business<->Sci/Tech
+        'hallu_target_class': None,                # only for flip_mode='targeted'
+        'hallu_attack_start_round': 0,             # attacker behaves benign before this round
+
         # ========== VGAE Training Parameters ==========
         # Reference paper: input_dim=5, hidden1_dim=32, hidden2_dim=16, num_epoch=10, lr=0.01
         # Note: dim_reduction_size should be <= total trainable parameters
@@ -993,6 +1036,56 @@ def main(config_overrides: Optional[Dict] = None):
         'proxy_max_batches_opt': 1,  # Max batches per _proxy_global_loss call in optimization loop (int)
                                 # Only has effect when proxy set has >1 batch (proxy_sample_size > test_batch_size).
         'proxy_max_batches_eval': 1,  # Max batches per _proxy_global_loss call in final evaluation (int)
+
+        # ========== Defense Configuration (V1: fedavg | hmp_gae) ==========
+        # defense_method selects the server-side aggregation rule.
+        #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
+        #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
+        'defense_method': 'fedavg',
+        'defense_config': {
+            # --- Node features (eta_i) ---
+            'proj_dim': 64,              # random-projection dim for flat update
+            'eta_dim': 64,               # output dim of f_enc MLP
+            'random_proj_seed': 42,      # shared across rounds
+            # --- Hypergraph (H) ---
+            'knn_k': 3,                  # k-NN neighbors; hyperedge size = k+1
+            # --- HMP encoder / decoder ---
+            'hidden_dim': 64,
+            'latent_dim': 32,
+            'num_hmp_layers': 2,         # L
+            # --- Self-supervised training (per round) ---
+            'train_steps_per_round': 5,
+            'train_lr': 1e-3,
+            'lambda_H': 1.0,             # BCE(H, H_hat) weight
+            'lambda_A': 1.0,             # smoothness: sum A_hat_ij ||z_i - z_j||^2
+            'lambda_hist': 0.5,          # ||z_i - z_hist_i||^2 weight
+            'weight_decay': 1e-5,
+            # --- Trust scoring ---
+            # Primary signal: graph-structural residual from hypergraph H
+            # (robust at cold start; attackers form tight sub-cluster with
+            # low hyperedge reach into the benign majority).
+            'graph_weight': 1.0,
+            # Secondary signal: learned A_hat residual (kicks in as encoder trains).
+            'residual_weight_alpha': 0.3,
+            # Historical deviation disabled by default: benign clients learning
+            # real features drift more than attackers stuck on a fixed mislabel
+            # manifold, which can invert the signal. Re-enable with care.
+            'hist_weight_beta': 0.0,
+            'softmax_tau': 0.1,          # only used when trust_mode='softmax'
+            # Trust-to-weight mapping:
+            #   'reject_then_fedavg' (default): detect attackers via trust
+            #       z-score > reject_z_threshold, then data-size-weighted
+            #       FedAvg among kept clients. Best behavior for V1.
+            #   'softmax': pure softmax over trust logits (can concentrate
+            #       weight on a single benign client).
+            'trust_mode': 'reject_then_fedavg',
+            'reject_z_threshold': 0.75,  # tuned on synthetic 8/2 split
+            'keep_min': 1,
+            # --- History (EMA) ---
+            'hist_ema_beta': 0.9,
+            # --- Misc ---
+            'device': 'cpu',             # HMP-GAE runs on CPU (N is small)
+        },
 
         # ========== Global checkpoint (for downstream generation / transfer experiments) ==========
         'save_global_checkpoint': True,  # True: save server.global_model after FL under results_dir/global_checkpoint_subdir

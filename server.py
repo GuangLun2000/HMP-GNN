@@ -4,10 +4,11 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Any
 import copy
 from client import BenignClient, AttackerClient
 import torch.nn.functional as F
+from defense import Defense, FedAvgDefense, build_defense
 
 
 class Server:
@@ -15,7 +16,10 @@ class Server:
     def __init__(self, global_model: nn.Module, test_loader,
                 total_rounds=20, server_lr=0.8,
                 dist_bound=0.5,
-                similarity_mode='local_vs_global'):
+                similarity_mode='local_vs_global',
+                defense_method: str = 'fedavg',
+                defense_config: Optional[Dict[str, Any]] = None,
+                num_clients: Optional[int] = None):
         self.global_model = copy.deepcopy(global_model)
         self.test_loader = test_loader
         self.total_rounds = total_rounds
@@ -36,11 +40,23 @@ class Server:
         self.similarity_mode = str(similarity_mode).lower() if similarity_mode else 'local_vs_global'
         if self.similarity_mode not in ('local_vs_global', 'pairwise', 'both'):
             self.similarity_mode = 'local_vs_global'
-        
+
         # Formula 4 constraint parameters (passed to attackers)
         self.dist_bound = dist_bound  # Distance threshold for constraint (4b)
         self.sim_bound_low = None  # Manual lower bound for cosine similarity (None = use benign min)
         self.sim_bound_up = None   # Manual upper bound for cosine similarity (None = use benign mean)
+
+        # Defense strategy (pluggable aggregation rule)
+        # 'fedavg' (default, backward-compatible) or 'hmp_gae' (this paper).
+        self.defense_method = (defense_method or 'fedavg').lower()
+        self.defense_config = defense_config or {}
+        self.defense: Defense = build_defense(
+            method=self.defense_method,
+            num_clients=num_clients if num_clients is not None else 0,
+            defense_config=self.defense_config,
+        )
+        # Track the round currently being aggregated (set in run_round).
+        self._current_round = 0
 
         # Track historical data
         self.history = {
@@ -250,41 +266,59 @@ class Server:
                 print(f"    Update {i}: {sim:.3f}")
         return similarity_matrix, similarities_derived
 
+    def _compute_raw_weights(self, client_ids: List[int]) -> List[float]:
+        """
+        Data-size-based weights used by FedAvg (and as the default prior for
+        defenses that do not override them).
+        """
+        weights: List[float] = []
+        for cid in client_ids:
+            client = self.clients[cid]
+            if getattr(client, 'is_attacker', False):
+                w = float(getattr(client, 'claimed_data_size', 1.0))
+            else:
+                w = float(len(getattr(client, 'data_indices', [])) or 1.0)
+            weights.append(w)
+        return weights
+
     def aggregate_updates(self, updates: List[torch.Tensor],
                           client_ids: List[int]) -> Dict:
         # Store client_ids for similarity display
         self._current_client_ids = client_ids
         self._sorted_client_ids = client_ids
-        
-        # Standard FedAvg aggregation
-        weights = []
-        for cid in client_ids:
-            client = self.clients[cid]
-            if getattr(client, 'is_attacker', False):
-                w = getattr(client, 'claimed_data_size', 1.0)
-            else:
-                w = len(getattr(client, 'data_indices', [])) or 1.0
-            weights.append(w)
-        
-        # Weighted aggregation (standard FedAvg)
-        dtype = updates[0].dtype
-        stacked = torch.stack(updates).to(self.device)
-        weight_tensor = torch.tensor(weights, device=self.device, dtype=dtype)
-        weight_tensor = weight_tensor / weight_tensor.sum()
-        aggregated_update = (stacked * weight_tensor.view(-1, 1)).sum(dim=0)
+
+        # Raw aggregation weights (data-size-based), passed to the defense as a prior.
+        raw_weights = self._compute_raw_weights(client_ids)
+
+        # Delegate to the configured defense strategy.
+        aggregated_update, defense_stats = self.defense.aggregate(
+            updates=updates,
+            client_ids=client_ids,
+            data_sizes=raw_weights,
+            round_num=self._current_round,
+            device=self.device,
+        )
+        # Ensure aggregated update is on the server device with consistent dtype.
+        aggregated_update = aggregated_update.to(device=self.device, dtype=updates[0].dtype)
         aggregated_update_norm = torch.norm(aggregated_update).item()
-        del stacked
-        
-        # Update global model (standard FedAvg: w_t+1 = w_t + η * aggregated_update)
+
+        # Update global model (standard FedAvg update rule: w_{t+1} = w_t + eta * Delta).
         current_params = self.global_model.get_flat_params()
         new_params = current_params + self.server_lr * aggregated_update
         self.global_model.set_flat_params(new_params)
-        
-        print(f"  📊 Standard FedAvg: Aggregated {len(updates)}/{len(updates)} updates")
+
+        defense_label = defense_stats.get('defense_name', self.defense_method)
+        print(f"  📊 Defense [{defense_label}]: Aggregated {len(updates)}/{len(updates)} updates")
         print(f"  🔧 Server Learning Rate: {self.server_lr}")
         print(f"  📐 Aggregated update norm: {aggregated_update_norm:.6f}")
-        
-        # Compute similarity and distance metrics for visualization
+        alpha_list = defense_stats.get('alpha')
+        if isinstance(alpha_list, list) and len(alpha_list) == len(client_ids):
+            alpha_summary = ", ".join(
+                f"c{cid}={a:.3f}" for cid, a in zip(client_ids, alpha_list)
+            )
+            print(f"  ⚖️  Trust weights: {alpha_summary}")
+
+        # Compute similarity and distance metrics for visualization (unchanged).
         mode = getattr(self, 'similarity_mode', 'local_vs_global')
         if mode == 'local_vs_global':
             similarities = self._compute_similarities(updates, client_ids)
@@ -297,7 +331,7 @@ class Server:
             similarities_vs_global = self._compute_similarities(updates, client_ids)
             similarity_matrix, similarities = self._compute_similarities_pairwise(updates, client_ids)
         euclidean_distances = self._compute_euclidean_distances(updates, client_ids) if len(updates) > 0 else np.array([])
-        
+
         aggregation_log = {
             'similarities': similarities.tolist(),
             'euclidean_distances': euclidean_distances.tolist() if len(euclidean_distances) > 0 else [],
@@ -306,8 +340,18 @@ class Server:
             'std_similarity': float(similarities.std()) if len(similarities) > 0 else 0.0,
             'mean_euclidean_distance': euclidean_distances.mean().item() if len(euclidean_distances) > 0 else 0.0,
             'std_euclidean_distance': euclidean_distances.std().item() if len(euclidean_distances) > 0 else 0.0,
-            'aggregated_update_norm': aggregated_update_norm
+            'aggregated_update_norm': aggregated_update_norm,
+            'defense_method': defense_label,
+            'trust_weights': alpha_list if isinstance(alpha_list, list) else None,
+            'raw_weights': raw_weights,
         }
+        # Persist extra defense stats (skip bulky numpy blobs like 'Z' from the
+        # main JSON log to keep result files lean; HMP runtime writes its own
+        # stats file if enabled).
+        for k in ('residual', 'hist_dev', 'L_rec', 'L_smooth', 'L_hist',
+                  'fallback_reason', 'defense_time_ms'):
+            if k in defense_stats:
+                aggregation_log[k] = defense_stats[k]
         if similarity_matrix is not None:
             aggregation_log['similarity_matrix'] = similarity_matrix.tolist()
         if similarities_vs_global is not None:
@@ -425,6 +469,9 @@ class Server:
         """Execute one round of federated learning - stable version."""
         print(f"\n{'=' * 60}")
         print(f"Round {round_num + 1}/{self.total_rounds}")
+
+        # Track the current round so the defense plugin can use it for history.
+        self._current_round = int(round_num)
 
         # Adaptive adjustment
         self.adaptive_adjustment(round_num)
