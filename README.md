@@ -12,19 +12,20 @@
 ├── README.md                          # This documentation
 ├── requirements.txt                   # Python dependencies
 ├── main.py                            # Entry: configure and run federated learning
-├── client.py                          # BenignClient, AttackerClient (GRMP), baselines hook
+├── client.py                          # Client base + BenignClient (FedProx local training)
 ├── server.py                          # Aggregation, evaluation, round orchestration
-├── models.py                          # NewsClassifierModel, VGAE, etc.
+├── models.py                          # NewsClassifierModel (SeqCLS + optional LoRA)
 ├── data_loader.py                     # DataManager / datasets (AG News, Yahoo Answers, IMDB, DBpedia)
 ├── fed_checkpoint.py                  # Save global model + metadata after FL
 ├── decoder_adapters.py                # SeqCLS backbone → CausalLM transfer adapters
 ├── run_downstream_generation.py       # CLI: checkpoint + probes → JSONL (Task 2)
 ├── visualization.py                   # Experiment figures / plots
-├── attack_baseline_alie.py            # ALIE baseline (NeurIPS ’19)
-├── attack_baseline_gaussian.py        # Gaussian baseline (USENIX Security ’20)
+├── attack_baseline_hallucination.py   # Hallucination attack via label-flipping (V1, main)
 ├── attack_baseline_sign_flipping.py   # Sign-flipping baseline (ICML ’18)
-├── attack_baseline_hallucination.py   # Hallucination attack via label-flipping (V1)
+├── attack_baseline_gaussian.py        # Gaussian baseline (USENIX Security ’20)
+├── attack_baseline_alie.py            # ALIE baseline (NeurIPS ’19)
 ├── defense.py                         # Pluggable defense strategies (V1: FedAvg / HMP-GAE)
+├── evaluation_hallucination.py        # V2 M7: end-of-FL PPL (backbone transfer to CausalLM)
 ├── hmp_gae/                           # HMP-GAE defense sub-package (this paper)
 │   ├── node_features.py               #   eta_i = f_enc(Delta_i, stats, history)
 │   ├── hypergraph.py                  #   k-NN hypergraph H, D_V, D_E
@@ -33,7 +34,9 @@
 │   ├── losses.py                      #   BCE(H,H_hat) + smoothness + hist
 │   ├── trust_scorer.py                #   closed-form trust -> alpha_i
 │   └── runtime.py                     #   end-to-end HMPGAERuntime
-├── GRMP_Attack_Colab.ipynb            # Colab-oriented notebook
+├── _v1_demo_run.py                    # Run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + figures
+├── _v1_seed_runs.py                   # 3-seed validation sweep for mean +/- std
+├── HMP_GAE_Colab.ipynb                # Google Colab one-click demo notebook
 └── data/                              # Datasets for Task 1 and Task 2
 ```
 
@@ -69,23 +72,19 @@ python main.py
 
 ### Google Colab Execution (or other Cloud AI platforms)
 
-**Option 1: Simple Version (Recommended for quick runs)**
+**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb) in Google Colab, set **Runtime → Change runtime type → T4 GPU**, then **Runtime → Run all**. The full V1 demo (3 experiments + 2 figures) finishes in **~10 minutes** on a free T4.
+
+**Alternative: pure shell version.**
 
 ```python
-# Cell 1: Install dependencies
+# Cell 1: Install
 !git clone https://github.com/GuangLun2000/HMP-GNN.git
-!pip install -r ./HMP-GNN/requirements.txt
+%cd HMP-GNN
+!pip install -q -r requirements.txt
 
-# Cell 2: Run experiment
-
-!cd ./HMP-GNN && python main.py
+# Cell 2: Run the demo
+!python _v1_demo_run.py
 ```
-
-**Option 2: Interactive Notebook (Recommended for configuration changes)**
-
-1. Open `GRMP_Attack_Colab.ipynb` in Google Colab
-2. Enable GPU: Runtime → Change runtime type → GPU
-3. Run all cells: Runtime → Run all
 
 <br>
 
@@ -165,11 +164,41 @@ Representative V1 demo numbers (N=10 clients, 2 attackers, 3 rounds, AG News sub
 
 The trust-weight evolution PDF (`figC_*.pdf`) shows the two attackers (red) collapsing to `alpha_i ≈ 0` from round 2 onward, while the 8 benign clients share the remaining mass close to uniform `1/8 = 0.125`.
 
-### V1 limitations / V2 roadmap
+### V2 M7: Hallucination Evaluation Metrics (no text generation)
 
-- V1 omits comparison baselines (Krum / Median / FLTrust / FLDetector / Safe-FedLLM). They are planned for V2.
-- Evaluation currently reports classification accuracy only. Semantic entropy, perplexity, and ASR on Task 2 generation are planned for V2.
-- Single modality (text) -- the paper's multimodal formulation is simulated via LoRA-only updates; true multimodal encoders are V2 work.
-- Tuning presets above are calibrated for the N=10 / 2-attackers / AG News regime. For N<=4 the defense auto-falls back to FedAvg; for very heterogeneous (Dirichlet alpha << 0.3) data, `reject_z_threshold` may need to be raised.
+Two additional metrics are computed without generating any text -- consistent with the paper's promise of reporting **task accuracy, semantic entropy, and perplexity** on the same benchmark.
+
+- **Classification Semantic Entropy (CSE)** -- the mean Shannon entropy `H(p(y|x))` of the SeqCLS softmax distribution over the test set. Under a hallucination-inducing attack the classifier becomes less confident, driving `H` up; HMP-GAE filtering should bring `H` back down. **Every round**, essentially free (shares the test-set forward pass with accuracy/loss). Implemented in [server.py::evaluate_with_loss](server.py); also see the Farquhar-style cluster interpretation in [evaluation_hallucination.py](evaluation_hallucination.py).
+- **Perplexity (PPL)** -- after FL finishes, the LoRA-fine-tuned backbone is transferred to an `AutoModelForCausalLM` via [decoder_adapters.py::resolve_adapter](decoder_adapters.py) and per-token negative log-likelihood is measured on a **stratified test subset** (default 200 samples, balanced across classes). No generation required. Available only for decoder-style backbones (Qwen, Pythia, OPT, GPT-2, LLaMA-family); encoder-only backbones such as DistilBERT/BERT report `skipped: true` cleanly.
+
+Config knobs (already in [main.py](main.py)):
+
+```python
+'eval_classification_semantic_entropy': True,   # per-round, always on
+'eval_perplexity': True,                         # end-of-FL, needs checkpoint
+'ppl_num_samples': 200,                          # balanced across classes
+'ppl_seed': 42,
+'ppl_max_length': None,                          # None -> reuse config['max_length']
+```
+
+Output files per run (the `results/` folder is gitignored -- everything below is produced by running `_v1_demo_run.py` or `_v1_seed_runs.py` locally / on Colab):
+
+- `results/<exp>_results.json` -- adds `progressive_metrics.cse` (per-round CSE list) and per-round `classification_semantic_entropy` in each `round_log`.
+- `results/<exp>_eval_ppl.json` -- dict with `ppl_mean`, `ppl_per_class`, `n_samples`, `mean_nll`.
+- `results/_v1_demo/figA_defense_bar.{png,pdf}` and `figC_trust_evolution.{png,pdf}` -- V1 core figures.
+- `results/_v1_demo/figE_metrics_grouped.{png,pdf}` and `figF_cse_evolution.{png,pdf}` -- V2 M7 three-metric bar + CSE evolution.
+
+Paper-ready outputs from `python _v1_seed_runs.py` (3-seed sweep):
+
+- `results/_v1_seed_runs/table_I.csv` -- ready-for-paper Table I with `mean ± std` for Accuracy, CSE, and PPL per defense.
+- `results/_v1_seed_runs/figE_metrics_grouped.pdf` -- three-panel bar chart: Accuracy (higher better), CSE (lower better), PPL (lower better).
+- `results/_v1_seed_runs/figF_cse_evolution.pdf` -- per-round CSE curve (FedAvg vs HMP-GAE) from the first seed.
+
+### V1 / V2 limitations and roadmap
+
+- V1 still omits comparison baselines (Krum / Median / FLTrust / FLDetector / Safe-FedLLM). Planned for the next V2 milestone.
+- PPL currently evaluates a decoder-only backbone; when `model_name` is encoder-only, PPL is skipped with a reason string in the JSON.
+- Single modality (text) -- the paper's multimodal formulation is simulated via LoRA-only updates; true multimodal encoders are later work.
+- Tuning presets above are calibrated for the N=10 / 2-attackers / AG News regime. For `num_clients <= 4` the defense auto-falls back to FedAvg; for very heterogeneous (`dirichlet_alpha << 0.3`) data, `reject_z_threshold` may need to be raised.
 
 <br>

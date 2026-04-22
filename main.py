@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Sequence
 # Import our custom modules
 from models import NewsClassifierModel
 from data_loader import DataManager, NewsDataset
-from client import BenignClient, AttackerClient
+from client import BenignClient
 from server import Server
 from visualization import ExperimentVisualizer
 from fed_checkpoint import save_global_model_checkpoint
@@ -202,15 +202,11 @@ def setup_experiment(config):
         test_loader=test_loader,
         total_rounds=config['num_rounds'],
         server_lr=config['server_lr'],
-        dist_bound=config.get('dist_bound', config.get('d_T', 0.5)),  # Renamed from d_T
-        similarity_mode=config.get('server_similarity_mode', 'local_vs_global'),
+        similarity_mode=config.get('server_similarity_mode', 'pairwise'),
         defense_method=config.get('defense_method', 'fedavg'),
         defense_config=config.get('defense_config', None),
         num_clients=config['num_clients'],
     )
-    # Manual cosine similarity bounds (None = use benign min/max)
-    server.sim_bound_low = config.get('sim_bound_low', None)
-    server.sim_bound_up = config.get('sim_bound_up', None)
 
     # 6. Create Clients
     print("\nCreating federated learning clients...")
@@ -244,21 +240,11 @@ def setup_experiment(config):
             )
         else:
             # --- Attacker Client ---
-            attack_method = config.get('attack_method', 'GRMP')
-            
-            # Use actual assigned data size for claimed_data_size (for fair weighted aggregation)
-            # Note: Attackers are data-agnostic (don't use data for training), but use assigned
-            # data size for aggregation weight to maintain realistic attack scenario
-            actual_data_size = len(client_indices[client_id])
-            # Allow config override if attacker wants to claim different size (for attack experiments)
-            config_claimed = config.get('attacker_claimed_data_size', None)
-            if config_claimed is None:
-                # Use actual assigned data size (recommended for realistic scenario)
-                claimed_data_size = actual_data_size
-            else:
-                # Override with config value (for attack experiments)
-                claimed_data_size = config_claimed
-            
+            attack_method = config.get('attack_method', 'Hallucination')
+            # Use the actual assigned data size as claimed size (realistic scenario:
+            # attackers do not exaggerate their contribution weight).
+            claimed_data_size = len(client_indices[client_id])
+
             # Create attacker based on attack_method
             if attack_method == 'ALIE':
                 # ========== ALIE Attack Client ==========
@@ -365,75 +351,67 @@ def setup_experiment(config):
                     gaussian_std_scale=gaussian_std_scale
                 )
             else:
-                # ========== GRMP Attack Client (default) ==========
-                print(f"  Client {client_id}: ATTACKER (GRMP Attack - VGAE Enabled)")
-                if config_claimed is None:
-                    print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
-                else:
-                    print(f"    WARNING: Override: Claimed data size D'_j(t): {claimed_data_size} (actual: {actual_data_size})")
-                
-                use_proxy = config.get('attacker_use_proxy_data', True)
-                if not use_proxy:
-                    print(f"    Attacker proxy data disabled (attacker_use_proxy_data=False); no dataset access.")
-                client = AttackerClient(
-                client_id=client_id,
-                model=global_model,
-                data_manager=data_manager,
-                data_indices=client_indices[client_id],
-                lr=config['client_lr'],
-                local_epochs=config['local_epochs'],
-                alpha=config['alpha'],
-                dim_reduction_size=config['dim_reduction_size'],
-                vgae_epochs=config['vgae_epochs'],
-                vgae_lr=config['vgae_lr'],
-                graph_threshold=config['graph_threshold'],
-                proxy_step=config['proxy_step'],
-                claimed_data_size=claimed_data_size,
-                proxy_sample_size=config['proxy_sample_size'],
-                proxy_max_batches_opt=config['proxy_max_batches_opt'],
-                proxy_max_batches_eval=config['proxy_max_batches_eval'],
-                vgae_hidden_dim=config['vgae_hidden_dim'],
-                vgae_latent_dim=config['vgae_latent_dim'],
-                vgae_dropout=config['vgae_dropout'],
-                vgae_kl_weight=config['vgae_kl_weight'],
-                proxy_steps=config['proxy_steps'],
-                grad_clip_norm=config['grad_clip_norm'],
-                proxy_grad_clip_norm=config.get('attacker_proxy_grad_clip_norm', 1.0),
-                early_stop_constraint_stability_steps=config.get('early_stop_constraint_stability_steps', 3),
-                use_proxy_data=use_proxy
-            )
-            
-            # Set Lagrangian Dual parameters (if using)
-            if config.get('use_lagrangian_dual', False):
-                client.set_lagrangian_params(
-                    use_lagrangian_dual=config['use_lagrangian_dual'],
-                    lambda_dist_init=config.get('lambda_dist_init', config.get('lambda_init', 0.1)),
-                    lambda_dist_lr=config.get('lambda_dist_lr', config.get('lambda_lr', 0.01)),
-                    use_cosine_similarity_constraint=config.get('use_cosine_similarity_constraint', False),
-                    use_pairwise_similarity_in_constraint=config.get('use_pairwise_similarity_in_constraint', False),
-                    lambda_sim_low_init=config.get('lambda_sim_low_init', config.get('lambda_sim_init', 0.1)),
-                    lambda_sim_up_init=config.get('lambda_sim_up_init', config.get('lambda_sim_init', 0.1)),
-                    lambda_sim_low_lr=config.get('lambda_sim_low_lr', config.get('lambda_sim_lr', 0.01)),
-                    lambda_sim_up_lr=config.get('lambda_sim_up_lr', config.get('lambda_sim_lr', 0.01)),
-                    # ========== Augmented Lagrangian (ALM) parameters ==========
-                    use_augmented_lagrangian=config.get('use_augmented_lagrangian', False),
-                    lambda_update_mode=config.get('lambda_update_mode', 'classic'),
-                    rho_dist_init=config.get('rho_dist_init', 1.0),
-                    rho_sim_low_init=config.get('rho_sim_low_init', 1.0),
-                    rho_sim_up_init=config.get('rho_sim_up_init', 1.0),
-                    rho_adaptive=config.get('rho_adaptive', True),
-                    rho_theta=config.get('rho_theta', 0.5),
-                    rho_increase_factor=config.get('rho_increase_factor', 2.0),
-                    rho_min=config.get('rho_min', 1e-3),
-                    rho_max=config.get('rho_max', 1e3),
+                raise ValueError(
+                    f"Unknown attack_method={attack_method!r}. Supported: "
+                    "'NoAttack' | 'Hallucination' | 'SignFlipping' | 'Gaussian' | 'ALIE'."
                 )
-                print(f"    Lagrangian Dual enabled: λ_dist(1)={config.get('lambda_dist_init', config.get('lambda_init', 0.1))}")
-            else:
-                print(f"    Using hard constraint mechanism (Lagrangian Dual disabled)")
 
         server.register_client(client)
     
     return server, results_dir
+
+
+def run_perplexity_eval_if_configured(config: Dict, results_dir: Path) -> None:
+    """
+    V2 M7: compute end-of-FL perplexity on a balanced test subset via backbone
+    transfer into AutoModelForCausalLM. Requires save_global_checkpoint=True.
+    Writes results/<experiment_name>_eval_ppl.json. Skips silently if disabled.
+    """
+    if not config.get("eval_perplexity", False):
+        return
+    if not config.get("save_global_checkpoint", False):
+        print("\n[PPL] Skipped: eval_perplexity=True requires save_global_checkpoint=True.")
+        return
+
+    ckpt_dir = results_dir / config.get("global_checkpoint_subdir", "global_checkpoint")
+    pt_file = ckpt_dir / "global_model.pt"
+    if not pt_file.is_file():
+        print(f"\n[PPL] Skipped: checkpoint not found at {pt_file}.")
+        return
+
+    try:
+        from evaluation_hallucination import compute_test_ppl
+    except ImportError as e:
+        print(f"\n[PPL] Skipped: cannot import evaluation_hallucination: {e}")
+        return
+
+    print("\n" + "=" * 60)
+    print("V2 M7: Perplexity evaluation (backbone transfer to CausalLM)")
+    print("=" * 60)
+    try:
+        result = compute_test_ppl(
+            checkpoint_dir=ckpt_dir,
+            n_samples=int(config.get("ppl_num_samples", 200)),
+            seed=int(config.get("ppl_seed", 42)),
+            max_length=config.get("ppl_max_length") or config.get("max_length", 128),
+            dataset_override=config.get("dataset"),
+            num_labels_override=config.get("num_labels"),
+            dataset_size_limit=config.get("dataset_size_limit"),
+        )
+    except Exception as e:
+        print(f"[PPL] Evaluation failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+
+    out_path = results_dir / f"{config.get('experiment_name', 'experiment')}_eval_ppl.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+    if result.get("skipped"):
+        print(f"[PPL] Skipped: {result.get('skip_reason')}")
+    else:
+        print(f"[PPL] PPL mean = {result['ppl_mean']:.4f} on {result['n_samples']} samples")
+    print(f"[PPL] Wrote {out_path}")
 
 
 def run_downstream_task2_if_configured(config: Dict, results_dir: Path) -> None:
@@ -516,7 +494,9 @@ def run_experiment(config):
         'rounds': [],
         'clean_acc': [],
         'acc_diff': [],
-        'agg_update_norm': []
+        'agg_update_norm': [],
+        # V2 M7: Classification Semantic Entropy, recorded each round.
+        'cse': [],
     }
 
     try:
@@ -528,6 +508,7 @@ def run_experiment(config):
             progressive_metrics['clean_acc'].append(round_log['clean_accuracy'])
             progressive_metrics['acc_diff'].append(round_log.get('acc_diff', 0.0))
             progressive_metrics['agg_update_norm'].append(round_log['aggregation'].get('aggregated_update_norm', 0.0))
+            progressive_metrics['cse'].append(round_log.get('classification_semantic_entropy', 0.0))
             
             # Memory cleanup after each round
             gc.collect()
@@ -556,6 +537,8 @@ def run_experiment(config):
     print(f"\nResults saved to: {results_path}")
 
     save_global_model_checkpoint(server, config, results_dir)
+
+    run_perplexity_eval_if_configured(config, results_dir)
 
     run_downstream_task2_if_configured(config, results_dir)
 
@@ -883,11 +866,8 @@ def main(config_overrides: Optional[Dict] = None):
         'seed': 42069,  # Random seed for reproducibility (int), 42 is the default
         
         # ========== Federated Learning Setup ==========
-        'num_clients': 5,  # Total number of federated learning clients (int)
-        'num_attackers': 0,  # Number of attacker clients (int, must be < num_clients)
-        'num_benign_clients': None,  # Optional: Explicit number of benign clients for baseline experiment
-                                    # If None, baseline will use (num_clients - num_attackers) to ensure fair comparison
-                                    # If set, baseline experiment will use exactly this many benign clients
+        'num_clients': 10,  # Total number of federated learning clients (int)
+        'num_attackers': 2,  # Number of attacker clients (int, must be < num_clients)
         'num_rounds': 5,  # Total number of federated learning rounds (int)
         
         # ========== Training Hyperparameters ==========
@@ -951,91 +931,27 @@ def main(config_overrides: Optional[Dict] = None):
         
 
         # ========== Attack Configuration ==========
-        'attack_method': 'GRMP',  # Attack method: 'GRMP', 'ALIE', 'SignFlipping', or 'Gaussian' (random model poisoning baseline)
-        'attack_start_round': 0,  # Round when attack phase starts (int, now all rounds use complete poisoning)
-        
-        # ========== ALIE Attack Parameters (only used when attack_method='ALIE') ==========
-        'alie_z_max': None,  # NeurIPS '19: z-score multiplier for ALIE. None = auto-compute based on num_clients and num_attackers
-        'alie_attack_start_round': None,  # Round to start ALIE attack (None = start immediately, overrides attack_start_round)
-        # ========== Sign-Flipping Attack Parameters (only used when attack_method='SignFlipping') ==========
-        'sign_flip_scale': 10.0,  # ICML '18: malicious = -scale * g_own (own update). Paper uses 10.
-        'sign_flip_attack_start_round': None,  # Round to start Sign-Flipping attack (None = start immediately)
-        # ========== Gaussian Attack Parameters (only used when attack_method='Gaussian') ==========
-        'gaussian_attack_start_round': None,  # USENIX Security '20: Round to start Gaussian attack (None = start immediately)
-        'gaussian_std_scale': 5.0,  # Scale factor for noise std: attack_vec ~ N(mean, (scale*std)²). scale>1 expands noise to increase impact (FedAvg). 1.0=original Fang et al.
+        # Supported: 'NoAttack' | 'Hallucination' (this paper) | 'SignFlipping' | 'Gaussian' | 'ALIE'
+        'attack_method': 'Hallucination',
+        'attack_start_round': 0,  # Visualization-only marker: round where attackers activate
 
-        # ========== Hallucination Attack Parameters (only used when attack_method='Hallucination') ==========
-        # Label-flipping-based hallucination attacker (this paper). Matches threat model:
-        # ||omega_a - omega'_a|| <= eps is satisfied naturally because attacker still
-        # performs standard FedProx local training -- only its training labels are flipped.
+        # ---- Hallucination (label-flipping, this paper's attacker) ----
+        # Matches the paper's stealth threat model: ||omega_a - omega'_a|| <= eps is
+        # satisfied naturally because the attacker performs standard FedProx local
+        # training, only against label-flipped data.
         'hallu_flip_ratio': 1.0,                   # fraction of samples whose labels are flipped
         'hallu_flip_mode': 'pairwise',             # 'pairwise' | 'targeted' | 'random'
         'hallu_flip_map': {0: 1, 1: 0, 2: 3, 3: 2},  # AG News: World<->Sports, Business<->Sci/Tech
         'hallu_target_class': None,                # only for flip_mode='targeted'
-        'hallu_attack_start_round': 0,             # attacker behaves benign before this round
+        'hallu_attack_start_round': 0,
 
-        # ========== VGAE Training Parameters ==========
-        # Reference paper: input_dim=5, hidden1_dim=32, hidden2_dim=16, num_epoch=10, lr=0.01
-        # Note: dim_reduction_size should be <= total trainable parameters
-        'dim_reduction_size': 1000,  # Reduced dimensionality of LLM parameters (auto-adjusted for LoRA if needed)
-        'vgae_epochs': 20,  # Number of epochs for VGAE training (reference: 20)
-        'vgae_lr': 0.01,  # Learning rate for VGAE optimizer (reference: 0.01)
-        'vgae_hidden_dim': 64,  # VGAE hidden layer dimension (per paper: hidden1_dim=32)
-        'vgae_latent_dim': 32,  # VGAE latent space dimension (per paper: hidden2_dim=16)
-        'vgae_dropout': 0,  # VGAE encoder dropout rate (0=no dropout, higher=more regularization to prevent overfitting)
-        'vgae_kl_weight': 0.1,  # KL divergence weight in VGAE loss: L = L_recon + kl_weight * KL(q||p). Higher=stronger latent regularization
-        # ========== Graph Construction Parameters ==========
-        'graph_threshold': 0.5,  # Cosine similarity threshold for adjacency matrix: A[i,j]=1 if sim(Δ_i,Δ_j)>threshold, else 0. Higher=sparser graph
-
-        # ========== GRMP Attack Optimization Parameters ==========
-        'proxy_step': 0.001,  # Step size for gradient-free ascent toward global-loss proxy
-        'proxy_steps': 200,  # Number of optimization steps for attack objective (int)
-        'attacker_proxy_grad_clip_norm': 1.0,  # GRMP attacker proxy parameter update only; separate from benign training
-        'attacker_claimed_data_size': None,  # None = use actual assigned data size
-        'early_stop_constraint_stability_steps': 1,  # Early stopping: stop after N consecutive steps satisfying constraint (int)
-
-        # ========== Formula 4 Constraint Parameters ==========
-        'dist_bound': None,  # Distance threshold for constraint (4b): d(w'_j(t), w'_g(t)) ≤ dist_bound (None = use benign max distance)
-        'sim_bound_low': None,  # Manual lower bound for cosine similarity (None = use benign min). e.g. 0.0 to require non-negative similarity
-        'sim_bound_up': None,   # Manual upper bound for cosine similarity (None = use benign mean)
-        # Server cosine similarity mode: 'local_vs_global' (each client vs Δ_g) | 'pairwise' (local vs local, report mean to others) | 'both'
-        'server_similarity_mode': 'pairwise',  # Use 'pairwise' to avoid self-comparison; set to 'local_vs_global' to match attack constraint definition
-
-        # ========== Lagrangian Dual Parameters ==========
-        'use_lagrangian_dual': True,  # Whether to use Lagrangian Dual mechanism (bool, True/False)
-        # Distance constraint multiplier parameters
-        'lambda_dist_init': 0.1,  # Initial λ_dist(t) value for distance constraint: dist(Δ_att, Δ_g) ≤ dist_bound
-        'lambda_dist_lr': 0.001,    # Learning rate for λ_dist(t) update (dual ascent step size)
-        
-        # ========== Cosine Similarity Constraint Parameters (TWO-SIDED with TWO multipliers) False by default ==========
-        'use_cosine_similarity_constraint': True,  # Whether to enable cosine similarity constraints (bool, True/False) False by default! open both to use pairwise sim
-        'use_pairwise_similarity_in_constraint': True,  # When True and similarity constraint on: use pairwise sim (align with server_similarity_mode='pairwise') open both to use pairwise sim
-        'lambda_sim_low_init': 0.1,  # Initial λ_sim_low(t) value for lower bound constraint: sim_bound_low <= sim_att
-        'lambda_sim_up_init': 0.1,   # Initial λ_sim_up(t) value for upper bound constraint: sim_att <= sim_bound_up
-        'lambda_sim_low_lr': 0.001,    # Learning rate for λ_sim_low(t) update
-        'lambda_sim_up_lr': 0.001,     # Learning rate for λ_sim_up(t) update
-
-        # ========== Augmented Lagrangian Method (ALM) Parameters ==========
-        # Standard ALM adds quadratic penalties: (ρ/2) * g(x)^2 for each inequality constraint g(x) ≤ 0.
-        'use_augmented_lagrangian': True,   # Enable Augmented Lagrangian (requires use_lagrangian_dual=True)
-        'lambda_update_mode': 'alm',    # Dual variable update: "classic"=λ += lr*g (fixed step), "alm"=λ += ρ*g (penalty-scaled step, standard ALM)
-        # Penalty parameters ρ (per-constraint): controls quadratic penalty strength (ρ/2)*max(0,g)^2 in ALM objective
-        'rho_dist_init': 1.0,
-        'rho_sim_low_init': 1.0,
-        'rho_sim_up_init': 1.0,
-        # Adaptive ρ update (monotone increase)
-        'rho_adaptive': True,
-        'rho_theta': 0.5,            # If σ_k > theta * σ_{k-1} then increase ρ
-        'rho_increase_factor': 2.0,
-        'rho_min': 1e-4,
-        'rho_max': 1e4,
-        # ========== Proxy Loss Estimation Parameters ==========
-        'attacker_use_proxy_data': True,  # If True, GRMP attacker uses proxy set to estimate F(w'_g); if False, no data access (constraint-only optimization)
-        'proxy_sample_size': 128,  # Number of samples in proxy dataset for F(w'_g) estimation (int)
-                                # Increased from 128 to 512 for better accuracy (4 batches with test_batch_size=128)
-        'proxy_max_batches_opt': 1,  # Max batches per _proxy_global_loss call in optimization loop (int)
-                                # Only has effect when proxy set has >1 batch (proxy_sample_size > test_batch_size).
-        'proxy_max_batches_eval': 1,  # Max batches per _proxy_global_loss call in final evaluation (int)
+        # ---- Classical Byzantine baselines (kept for V2 comparison) ----
+        'sign_flip_scale': 10.0,                 # ICML '18: malicious = -scale * g_own
+        'sign_flip_attack_start_round': None,
+        'gaussian_std_scale': 5.0,               # USENIX Security '20: noise-std multiplier
+        'gaussian_attack_start_round': None,
+        'alie_z_max': None,                      # NeurIPS '19: None = auto by (num_clients, num_attackers)
+        'alie_attack_start_round': None,
 
         # ========== Defense Configuration (V1: fedavg | hmp_gae) ==========
         # defense_method selects the server-side aggregation rule.
@@ -1087,6 +1003,21 @@ def main(config_overrides: Optional[Dict] = None):
             'device': 'cpu',             # HMP-GAE runs on CPU (N is small)
         },
 
+        # ========== Hallucination Evaluation (V2 M7) ==========
+        # CSE: Classification Semantic Entropy, computed every round on the
+        # SeqCLS softmax distribution (free -- shares the test-set forward pass
+        # with accuracy/loss). Always on.
+        #
+        # PPL: Perplexity on a balanced test subset computed by transferring
+        # the final LoRA-fine-tuned backbone into an AutoModelForCausalLM
+        # (see decoder_adapters.py). Runs once at end of FL, requires
+        # save_global_checkpoint=True.
+        'eval_classification_semantic_entropy': True,   # per round, essentially free
+        'eval_perplexity': True,                         # end-of-FL, moderate cost
+        'ppl_num_samples': 200,                          # stratified across classes
+        'ppl_seed': 42,
+        'ppl_max_length': None,                          # None -> reuse config['max_length']
+
         # ========== Global checkpoint (for downstream generation / transfer experiments) ==========
         'save_global_checkpoint': True,  # True: save server.global_model after FL under results_dir/global_checkpoint_subdir
         'global_checkpoint_subdir': 'global_checkpoint',  # Subfolder name under results/ (same run uses results_dir from setup)
@@ -1106,15 +1037,17 @@ def main(config_overrides: Optional[Dict] = None):
 
     # Run experiment (attack if num_attackers > 0, baseline if num_attackers == 0)
     if config.get('num_attackers', 0) > 0:
-        attack_method = config.get('attack_method', 'GRMP')
-        if attack_method == 'ALIE':
+        attack_method = config.get('attack_method', 'Hallucination')
+        if attack_method == 'Hallucination':
+            print("Running Hallucination Attack (label-flipping, this paper)...")
+        elif attack_method == 'ALIE':
             print("Running ALIE Attack (Model Poisoning Baseline)...")
         elif attack_method == 'SignFlipping':
             print("Running Sign-Flipping Attack (Model Poisoning Baseline)...")
         elif attack_method == 'Gaussian':
             print("Running Gaussian Attack (Random Model Poisoning Baseline)...")
         else:
-            print("Running GRMP Attack with VGAE...")
+            print(f"Running attack: {attack_method}")
     else:
         print("Running Baseline Experiment (No Attack)...")
     

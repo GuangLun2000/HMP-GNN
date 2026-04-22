@@ -3,6 +3,7 @@
 # Generates plots matching the paper's Figure 3, 4, 5, and 6
 
 import matplotlib.pyplot as plt
+import math
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -996,3 +997,234 @@ def summarize_run_for_fig_a(results_json_path, default_label='run') -> Dict[str,
         'label': default_label,
         'acc_std': 0.0,
     }
+
+
+# --------------------------------------------------------------------------- #
+# V2 M7 hallucination-eval plotting (CSE + PPL)                               #
+# --------------------------------------------------------------------------- #
+
+def summarize_run_multi_metric(results_json_path,
+                                ppl_json_path=None,
+                                default_label='run') -> Dict[str, Any]:
+    """
+    Extended single-run summary including V2 M7 metrics.
+
+    Reads `<exp>_results.json` for accuracy and per-round CSE, and optionally
+    the separate `<exp>_eval_ppl.json` produced by evaluation_hallucination.
+    Returns a dict with final_acc / final_cse / mean_cse / ppl fields.
+    """
+    p = Path(results_json_path)
+    summary: Dict[str, Any] = {
+        'label': default_label,
+        'final_clean_acc': 0.0,
+        'best_clean_acc': 0.0,
+        'final_cse': None,
+        'mean_cse': None,
+        'ppl': None,
+        'acc_std': 0.0,
+        'cse_std': 0.0,
+        'ppl_std': 0.0,
+    }
+    if not p.is_file():
+        return summary
+    with open(p, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    pm = data.get('progressive_metrics', {})
+    accs = pm.get('clean_acc', [])
+    if accs:
+        summary['final_clean_acc'] = float(accs[-1])
+        summary['best_clean_acc'] = float(max(accs))
+    cse = pm.get('cse', [])
+    if cse:
+        summary['final_cse'] = float(cse[-1])
+        summary['mean_cse'] = float(sum(cse) / len(cse))
+
+    if ppl_json_path is not None:
+        q = Path(ppl_json_path)
+        if q.is_file():
+            with open(q, 'r', encoding='utf-8') as f:
+                pdata = json.load(f)
+            if not pdata.get('skipped'):
+                summary['ppl'] = float(pdata.get('ppl_mean')) if pdata.get('ppl_mean') is not None else None
+    return summary
+
+
+def plot_cse_evolution(runs: Dict[str, Any], save_path,
+                       title_suffix: str = '',
+                       x_attack_start: Optional[int] = None):
+    """
+    Fig F: per-round Classification Semantic Entropy curves across configurations.
+
+    Args:
+        runs: dict label -> {'rounds': [...], 'cse': [...]} or a result-json path.
+              When a value is a str/Path, this function reads the JSON and pulls
+              progressive_metrics.rounds + .cse automatically.
+        save_path: output path (PDF twin saved alongside).
+        title_suffix: appended to the figure title.
+        x_attack_start: if set, draws a dashed vertical line at that round to
+                        mark when the attacker activates.
+    """
+    resolved: Dict[str, Dict[str, List[float]]] = {}
+    for label, val in runs.items():
+        if isinstance(val, (str, Path)):
+            p = Path(val)
+            if not p.is_file():
+                print(f"  [plot_cse_evolution] skip {label!r}: {p} not found")
+                continue
+            with open(p, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            pm = d.get('progressive_metrics', {})
+            resolved[label] = {
+                'rounds': list(pm.get('rounds', [])),
+                'cse': list(pm.get('cse', [])),
+            }
+        elif isinstance(val, dict):
+            resolved[label] = {
+                'rounds': list(val.get('rounds', [])),
+                'cse': list(val.get('cse', [])),
+            }
+
+    # Drop empty runs.
+    resolved = {k: v for k, v in resolved.items() if v.get('cse')}
+    if not resolved:
+        print("  [plot_cse_evolution] no usable runs; skipping")
+        return
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.0))
+    style_map = {
+        'no attack': {'color': '#2E75B6', 'linestyle': '--', 'marker': 'o'},
+        'fedavg':     {'color': '#C0392B', 'linestyle': '-',  'marker': 's'},
+        'hmp-gae':    {'color': '#0B6E4F', 'linestyle': '-',  'marker': '^'},
+    }
+    for label, series in resolved.items():
+        key = 'no attack' if 'no attack' in label.lower() else (
+            'hmp-gae' if 'hmp' in label.lower() else 'fedavg'
+        )
+        style = style_map.get(key, {'color': '#7F7F7F', 'linestyle': '-', 'marker': 'x'})
+        ax.plot(series['rounds'], series['cse'],
+                label=label, linewidth=1.6, markersize=5,
+                **style)
+
+    if x_attack_start is not None:
+        ax.axvline(x_attack_start, linestyle=':', linewidth=1.0, color='gray',
+                   label=f'attack start ({x_attack_start})')
+
+    ax.set_xlabel('Communication Round')
+    ax.set_ylabel(r'Classification Semantic Entropy $H(p(y|x))$')
+    title = 'Semantic Entropy Evolution'
+    if title_suffix:
+        title += f' ({title_suffix})'
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=9)
+    fig.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, bbox_inches='tight', dpi=300)
+    fig.savefig(save_path.with_suffix('.pdf'), bbox_inches='tight')
+    plt.close(fig)
+    print(f"  CSE evolution saved to: {save_path} (+ .pdf)")
+
+
+def plot_hallucination_metrics_grouped_bar(
+    summaries_by_defense: Dict[str, Dict[str, Any]],
+    save_path,
+    attack_label: str = 'Hallucination Attack',
+):
+    """
+    Fig E: three-panel bar chart (Accuracy / CSE / PPL) comparing defenses.
+
+    Args:
+        summaries_by_defense: dict label -> summary from summarize_run_multi_metric.
+            Expected fields per summary: final_clean_acc, final_cse (or mean_cse),
+            ppl, and optional _std counterparts.
+        save_path: output path (PDF twin saved alongside).
+    """
+    labels = list(summaries_by_defense.keys())
+    if not labels:
+        print("  [plot_hallucination_metrics_grouped_bar] no labels; skipping")
+        return
+
+    def _field(label: str, key: str, default=None):
+        return summaries_by_defense[label].get(key, default)
+
+    accs = [float(_field(k, 'final_clean_acc', 0.0)) for k in labels]
+    cses = [float(_field(k, 'mean_cse') if _field(k, 'mean_cse') is not None
+                  else _field(k, 'final_cse', 0.0) or 0.0) for k in labels]
+    # Skip CSE bar when everything is zero/None; still plot accuracy + PPL.
+    ppls_raw = [_field(k, 'ppl') for k in labels]
+    ppls = [float(v) if v is not None else float('nan') for v in ppls_raw]
+    acc_stds = [float(_field(k, 'acc_std', 0.0)) for k in labels]
+    cse_stds = [float(_field(k, 'cse_std', 0.0)) for k in labels]
+    ppl_stds = [float(_field(k, 'ppl_std', 0.0)) for k in labels]
+
+    def _color(lbl: str) -> str:
+        l = lbl.lower()
+        if 'hmp' in l:
+            return '#0B6E4F'
+        if 'no attack' in l or 'clean' in l:
+            return '#2E75B6'
+        if 'fedavg' in l:
+            return '#C0392B'
+        return '#7F7F7F'
+
+    colors = [_color(k) for k in labels]
+
+    fig, axes = plt.subplots(1, 3, figsize=(11.5, 4.0))
+    xs = np.arange(len(labels))
+
+    # Panel 1: accuracy (higher better)
+    axes[0].bar(xs, accs,
+                yerr=acc_stds if any(s > 0 for s in acc_stds) else None,
+                capsize=3, color=colors, edgecolor='black', linewidth=0.8)
+    for x, v in zip(xs, accs):
+        axes[0].text(x, v + 0.005, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+    axes[0].set_xticks(xs); axes[0].set_xticklabels(labels, rotation=15, ha='right')
+    axes[0].set_ylabel('Accuracy')
+    axes[0].set_title(r'Task Accuracy $\uparrow$')
+    axes[0].set_ylim(0, max(1.0, max(accs) * 1.15))
+    axes[0].grid(True, axis='y', alpha=0.3)
+
+    # Panel 2: CSE (lower better)
+    axes[1].bar(xs, cses,
+                yerr=cse_stds if any(s > 0 for s in cse_stds) else None,
+                capsize=3, color=colors, edgecolor='black', linewidth=0.8)
+    for x, v in zip(xs, cses):
+        axes[1].text(x, v * 1.01, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+    axes[1].set_xticks(xs); axes[1].set_xticklabels(labels, rotation=15, ha='right')
+    axes[1].set_ylabel('Mean CSE')
+    axes[1].set_title(r'Classification Semantic Entropy $\downarrow$')
+    axes[1].set_ylim(0, max(1e-6, max(cses)) * 1.25)
+    axes[1].grid(True, axis='y', alpha=0.3)
+
+    # Panel 3: PPL (lower better). If everything is NaN (encoder-only model),
+    # display a message.
+    if all(math.isnan(p) for p in ppls):
+        axes[2].text(0.5, 0.5, 'PPL unavailable\n(encoder-only backbone)',
+                     ha='center', va='center', transform=axes[2].transAxes,
+                     fontsize=10, color='#7F7F7F')
+        axes[2].set_xticks([]); axes[2].set_yticks([])
+        axes[2].set_title(r'Perplexity $\downarrow$')
+    else:
+        safe_ppls = [0.0 if math.isnan(p) else p for p in ppls]
+        axes[2].bar(xs, safe_ppls,
+                    yerr=ppl_stds if any(s > 0 for s in ppl_stds) else None,
+                    capsize=3, color=colors, edgecolor='black', linewidth=0.8)
+        for x, v in zip(xs, ppls):
+            if not math.isnan(v):
+                axes[2].text(x, v * 1.01, f'{v:.1f}', ha='center', va='bottom', fontsize=9)
+        axes[2].set_xticks(xs); axes[2].set_xticklabels(labels, rotation=15, ha='right')
+        axes[2].set_ylabel('Perplexity')
+        axes[2].set_title(r'Perplexity $\downarrow$')
+        axes[2].set_ylim(0, max(1e-6, max(safe_ppls)) * 1.25)
+        axes[2].grid(True, axis='y', alpha=0.3)
+
+    fig.suptitle(f'Hallucination-Resilience Metrics under {attack_label}', y=1.02, fontsize=12)
+    fig.tight_layout()
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, bbox_inches='tight', dpi=300)
+    fig.savefig(save_path.with_suffix('.pdf'), bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Hallucination-metrics grouped bar saved to: {save_path} (+ .pdf)")

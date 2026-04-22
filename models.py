@@ -1,16 +1,18 @@
 # models.py
-# This module defines the NewsClassifierModel for News classification
-# and the VGAE model for GRMP attack.
+# NewsClassifierModel: HuggingFace SeqCLS wrapper with optional LoRA fine-tuning.
 #
 # Supported Model Architectures:
 # - Encoder-only (BERT-style): distilbert-base-uncased, bert-base-uncased, roberta-base, deberta-v3-base
 # - Decoder-only (GPT-style): EleutherAI/pythia-160m, EleutherAI/pythia-1b, facebook/opt-125m, gpt2, Qwen/Qwen2.5-0.5B
+#
+# Note: The VGAE/GraphConvolutionLayer classes that used to live here were
+# part of the deprecated GRMP attacker and have been removed in V1. HMP-GAE
+# has its own encoder/decoder implementation in the `hmp_gae/` subpackage.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoModelForSequenceClassification
-from typing import Tuple, Optional
+from typing import Optional
 
 # --- Constants ---
 MODEL_NAME = 'distilbert-base-uncased'
@@ -328,194 +330,3 @@ class NewsClassifierModel(nn.Module):
                 f"Some LoRA parameters may not have been set."
             )
 
-
-class GraphConvolutionLayer(nn.Module):
-    """
-    Simple Graph Convolution Layer (GCN).
-    Formula: Output = A * X * W + b
-    """
-    def __init__(self, in_features: int, out_features: int):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        
-        # Define parameters
-        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
-        self.bias = nn.Parameter(torch.FloatTensor(out_features))
-        
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        """Initialize parameters using Xavier Uniform."""
-        nn.init.xavier_uniform_(self.weight)
-        nn.init.zeros_(self.bias)
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        # Support = X * W
-        support = torch.mm(x, self.weight)
-        # Output = Adj * Support + b
-        output = torch.mm(adj, support) + self.bias
-        return output
-
-
-class VGAE(nn.Module):
-    """
-    Variational Graph Autoencoder (VGAE) for GRMP attack.
-    
-    This model learns the relational structure among benign updates (as a graph)
-    to generate adversarial gradients that mimic legitimate patterns.
-    
-    Standard VGAE architecture:
-    - Encoder: Two-layer GCN that outputs mean (μ) and log variance (log σ²)
-    - Reparameterization: z = μ + σ * ε (where ε ~ N(0,1))
-    - Decoder: Inner product decoder for adjacency matrix reconstruction
-    - Loss: L = L_recon + β * KL(q(z|X,A) || p(z))
-    """
-
-    def __init__(self, input_dim: int, hidden_dim: int = 64, latent_dim: int = 32, 
-                 dropout: float = 0.2, kl_weight: float = 0.1):
-        """
-        Initialize VGAE model.
-        
-        Args:
-            input_dim: Input feature dimension (number of clients/benign models)
-            hidden_dim: Hidden layer dimension (default: 64)
-            latent_dim: Latent space dimension (default: 32)
-            dropout: Dropout rate (default: 0.2)
-            kl_weight: Weight for KL divergence term in loss function (default: 0.1)
-                       Lower values prevent posterior collapse, higher values enforce
-                       stronger regularization toward standard normal distribution.
-        """
-        super().__init__()
-        
-        self.input_dim = input_dim
-        self.kl_weight = kl_weight
-        
-        # --- Encoder Layers ---
-        self.gc1 = GraphConvolutionLayer(input_dim, hidden_dim)
-        self.gc2_mu = GraphConvolutionLayer(hidden_dim, latent_dim)
-        self.gc2_logvar = GraphConvolutionLayer(hidden_dim, latent_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def encode(self, x: torch.Tensor, adj: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encodes input features and adjacency matrix into latent distribution parameters."""
-        
-        # Normalize adjacency matrix (symmetric normalization)
-        adj_norm = self._normalize_adj(adj)
-
-        # Layer 1: GCN + ReLU + Dropout
-        hidden = self.gc1(x, adj_norm)
-        hidden = F.relu(hidden)
-        hidden = self.dropout(hidden)
-
-        # Layer 2: Output Mean and Log Variance
-        mu = self.gc2_mu(hidden, adj_norm)
-        logvar = self.gc2_logvar(hidden, adj_norm)
-        
-        return mu, logvar
-
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """
-        Reparameterization trick: z = mu + sigma * epsilon
-        Allows backpropagation through stochastic nodes.
-        """
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return mu + eps * std
-        else:
-            return mu
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        Inner product decoder: reconstructs the adjacency matrix.
-        Returns logits (before sigmoid) for use with binary_cross_entropy_with_logits.
-        A_pred = Z * Z^T (logits)
-        
-        Note: Apply sigmoid if probabilities are needed (e.g., for GSP module).
-        """
-        adj_reconstructed = torch.mm(z, z.t())  # Return logits, not probabilities
-        return adj_reconstructed
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Full forward pass."""
-        mu, logvar = self.encode(x, adj)
-        z = self.reparameterize(mu, logvar)
-        adj_reconstructed = self.decode(z)
-        return adj_reconstructed, mu, logvar
-
-    def _normalize_adj(self, adj: torch.Tensor) -> torch.Tensor:
-        """
-        Symmetrically normalize adjacency matrix: D^(-1/2) * (A + I) * D^(-1/2).
-        Implementation handles self-loops by adding Identity matrix.
-        """
-        # Add self-loops
-        adj_with_loop = adj + torch.eye(adj.size(0), device=adj.device)
-        
-        # Calculate degree matrix D
-        d_vec = adj_with_loop.sum(1)
-        
-        # Calculate D^(-1/2)
-        d_inv_sqrt = torch.pow(d_vec, -0.5)
-        d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.
-        d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
-        
-        # A_norm = D^(-1/2) * A * D^(-1/2)
-        return torch.mm(torch.mm(d_mat_inv_sqrt, adj_with_loop), d_mat_inv_sqrt)
-
-    def loss_function(self, adj_reconstructed: torch.Tensor, adj_orig: torch.Tensor, 
-                     mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """
-        Calculates VGAE loss: Reconstruction Loss (Weighted BCE) + KL Divergence.
-        
-        Standard VGAE loss formulation:
-            L = L_recon + β * KL(q(z|X,A) || p(z))
-        
-        where:
-            - L_recon: Weighted binary cross-entropy for adjacency matrix reconstruction
-            - KL: KL divergence from approximate posterior q(z|X,A) to prior p(z) = N(0,1)
-            - β: Weighting factor (self.kl_weight) to balance reconstruction and regularization
-        
-        Args:
-            adj_reconstructed: Reconstructed adjacency matrix from decoder
-            adj_orig: Original adjacency matrix
-            mu: Mean of latent distribution (from encoder), shape: (n_nodes, latent_dim)
-            logvar: Log variance of latent distribution (from encoder), shape: (n_nodes, latent_dim)
-        
-        Returns:
-            Total VGAE loss (scalar tensor)
-        """
-        n_nodes = adj_orig.size(0)
-        
-        # Calculate weights for imbalanced classes (edges vs non-edges)
-        # Typically graphs are sparse, so we weight positive edges more
-        num_edges = adj_orig.sum().item()  # Convert to Python scalar
-        num_non_edges = n_nodes * n_nodes - num_edges
-        
-        # Avoid division by zero
-        if num_edges == 0:
-            pos_weight = torch.tensor(1.0, device=adj_orig.device)
-        else:
-            pos_weight = torch.tensor(num_non_edges / num_edges, device=adj_orig.device)
-            
-        norm = (n_nodes * n_nodes) / (num_non_edges * 2) if num_non_edges > 0 else 1.0
-
-        # 1. Reconstruction Loss (Weighted Binary Cross Entropy)
-        # Formula: -[y*log(σ(x)) + (1-y)*log(1-σ(x))] with pos_weight for class imbalance
-        bce_loss = norm * F.binary_cross_entropy_with_logits(
-            adj_reconstructed, 
-            adj_orig, 
-            pos_weight=pos_weight
-        )
-
-        # 2. KL Divergence (Regularization term)
-        # Standard formula: KL(N(μ, σ²) || N(0, 1)) = -0.5 * Σ[1 + log(σ²) - μ² - σ²]
-        # where logvar = log(σ²), so σ² = exp(logvar)
-        # Per node: sum over latent dimensions, then average over all nodes
-        kl_per_node = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-        kl_loss = torch.mean(kl_per_node)  # Average over all nodes (standard VGAE implementation)
-
-        # Combine losses: L = L_recon + β * KL
-        # β (kl_weight) balances reconstruction quality vs. regularization strength
-        return bce_loss + self.kl_weight * kl_loss

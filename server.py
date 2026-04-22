@@ -6,7 +6,7 @@ import torch.nn as nn
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 import copy
-from client import BenignClient, AttackerClient
+from client import BenignClient
 import torch.nn.functional as F
 from defense import Defense, FedAvgDefense, build_defense
 
@@ -14,9 +14,8 @@ from defense import Defense, FedAvgDefense, build_defense
 class Server:
     """Server class for federated learning with model aggregation"""
     def __init__(self, global_model: nn.Module, test_loader,
-                total_rounds=20, server_lr=0.8,
-                dist_bound=0.5,
-                similarity_mode='local_vs_global',
+                total_rounds=20, server_lr=1.0,
+                similarity_mode='pairwise',
                 defense_method: str = 'fedavg',
                 defense_config: Optional[Dict[str, Any]] = None,
                 num_clients: Optional[int] = None):
@@ -36,15 +35,11 @@ class Server:
 
         # Server parameters
         self.server_lr = server_lr  # Server learning rate
-        # Similarity mode: 'local_vs_global' | 'pairwise' | 'both'
-        self.similarity_mode = str(similarity_mode).lower() if similarity_mode else 'local_vs_global'
+        # Similarity mode (diagnostics only, consumed by visualization):
+        # 'local_vs_global' | 'pairwise' | 'both'
+        self.similarity_mode = str(similarity_mode).lower() if similarity_mode else 'pairwise'
         if self.similarity_mode not in ('local_vs_global', 'pairwise', 'both'):
-            self.similarity_mode = 'local_vs_global'
-
-        # Formula 4 constraint parameters (passed to attackers)
-        self.dist_bound = dist_bound  # Distance threshold for constraint (4b)
-        self.sim_bound_low = None  # Manual lower bound for cosine similarity (None = use benign min)
-        self.sim_bound_up = None   # Manual upper bound for cosine similarity (None = use benign mean)
+            self.similarity_mode = 'pairwise'
 
         # Defense strategy (pluggable aggregation rule)
         # 'fedavg' (default, backward-compatible) or 'hmp_gae' (this paper).
@@ -403,26 +398,34 @@ class Server:
     def evaluate(self) -> float:
         """
         Evaluate the global model's performance.
-        
+
         Returns:
             Clean accuracy (float) on the test set
         """
-        accuracy, _ = self.evaluate_with_loss()
+        accuracy, _, _ = self.evaluate_with_loss()
         return accuracy
-    
-    def evaluate_with_loss(self) -> Tuple[float, float]:
+
+    def evaluate_with_loss(self) -> Tuple[float, float, float]:
         """
-        Evaluate the global model's performance and loss in a single pass.
-        
+        Evaluate the global model's performance in a single pass and also
+        compute the Classification Semantic Entropy (CSE) on the SeqCLS head.
+
         Returns:
-            Tuple of (clean_accuracy, global_loss) on the test set
+            Tuple of (clean_accuracy, global_loss, classification_semantic_entropy).
+
+        The CSE is the mean Shannon entropy of the softmax class distribution
+        p(y|x) over the test set. Lower = more confident predictions; under a
+        hallucination-inducing attack the model becomes less confident and CSE
+        increases. A principled no-generation surrogate for Farquhar-style
+        semantic entropy, using the C class labels as the "semantic clusters".
         """
         self.global_model.eval()
 
-        # Evaluate clean accuracy and loss in one pass
+        # Evaluate clean accuracy, loss and CSE in one forward pass.
         correct = 0
         total = 0
         total_loss = 0.0
+        total_cse = 0.0
 
         with torch.no_grad():
             for batch in self.test_loader:
@@ -431,23 +434,35 @@ class Server:
                 labels = batch['labels'].to(self.device)
 
                 outputs = self.global_model(input_ids, attention_mask)
-                
-                # Compute accuracy
+
+                # Accuracy
                 predictions = torch.argmax(outputs, dim=1)
                 correct += (predictions == labels).sum().item()
                 total += labels.size(0)
-                
-                # Compute loss
+
+                # Cross-entropy loss (sum over batch for later averaging).
                 loss = F.cross_entropy(outputs, labels, reduction='sum')
                 total_loss += loss.item()
 
-        clean_accuracy = correct / total if total > 0 else 0
+                # Classification Semantic Entropy (per-sample Shannon entropy,
+                # summed here and averaged at the end).
+                # Use log_softmax for numerical stability.
+                log_probs = F.log_softmax(outputs, dim=1)
+                probs = log_probs.exp()
+                batch_cse = -(probs * log_probs).sum(dim=1)  # (B,)
+                total_cse += batch_cse.sum().item()
+
+        clean_accuracy = correct / total if total > 0 else 0.0
         avg_loss = total_loss / total if total > 0 else 0.0
+        mean_cse = total_cse / total if total > 0 else 0.0
 
-        # Record historical metrics
+        # Record historical metrics.
         self.history['clean_acc'].append(clean_accuracy)
+        if 'cse' not in self.history:
+            self.history['cse'] = []
+        self.history['cse'].append(mean_cse)
 
-        return clean_accuracy, avg_loss
+        return clean_accuracy, avg_loss, mean_cse
     
     def evaluate_global_loss(self) -> float:
         """
@@ -457,7 +472,7 @@ class Server:
         Returns:
             Global loss (float) on the test set (cross-entropy loss)
         """
-        _, loss = self.evaluate_with_loss()
+        _, loss, _ = self.evaluate_with_loss()
         return loss
 
     def adaptive_adjustment(self, round_num: int):
@@ -483,38 +498,6 @@ class Server:
         # Broadcast the model
         print("📡 Broadcasting the global model...")
         self.broadcast_model()
-        
-        # Set global model params and constraint parameters for attackers (Formula 4)
-        global_params = self.global_model.get_flat_params()  # Already on GPU (server model is on GPU)
-        
-        # Calculate total data size D(t) and benign client data sizes for Formula (2) and (3)
-        total_data_size = 0.0
-        benign_data_sizes = {}
-        for client in self.clients:
-            if getattr(client, 'is_attacker', False):
-                total_data_size += getattr(client, 'claimed_data_size', 1.0)
-            else:
-                client_data_size = len(getattr(client, 'data_indices', [])) or 1.0
-                benign_data_sizes[client.client_id] = client_data_size
-                total_data_size += client_data_size
-        
-        for client in self.clients:
-            # Use is_attacker attribute instead of isinstance to support both GRMP and ALIE attackers
-            if getattr(client, 'is_attacker', False):
-                # Set global model params and constraint params (for GRMP attackers)
-                # ALIE attackers also implement these methods for interface compatibility
-                client.set_global_model_params(global_params)
-                # Set constraint parameters: d_T, total_data_size, and benign_data_sizes
-                # d_T: distance threshold for proximity constraint (4b)
-                # total_data_size: D(t) for Formula (2) and (3)
-                # benign_data_sizes: {client_id: D_i(t)} for Formula (2) and (3)
-                client.set_constraint_params(
-                    dist_bound=self.dist_bound,
-                    sim_bound_low=getattr(self, 'sim_bound_low', None),
-                    sim_bound_up=getattr(self, 'sim_bound_up', None),
-                    total_data_size=total_data_size,
-                    benign_data_sizes=benign_data_sizes
-                )
 
         # Phase 1: Preparation
         print("\n🔧 Phase 1: Client Preparation")
@@ -584,9 +567,9 @@ class Server:
         
         aggregation_log = self.aggregate_updates(final_update_list, sorted_client_ids)
 
-        # Evaluate the global model (compute accuracy and loss together for efficiency)
-        clean_acc, global_loss = self.evaluate_with_loss()
-        
+        # Evaluate the global model (compute accuracy, loss and CSE in one pass).
+        clean_acc, global_loss, mean_cse = self.evaluate_with_loss()
+
         # Evaluate local accuracies for each client
         local_accs_this_round = {}
         for client in self.clients:
@@ -607,6 +590,7 @@ class Server:
             'round': round_num + 1,
             'clean_accuracy': clean_acc,
             'global_loss': global_loss,  # Add global loss to log for visualization
+            'classification_semantic_entropy': mean_cse,  # V2 M7 metric
             'acc_diff': (abs(clean_acc - self.history['clean_acc'][-2])
                          if len(self.history['clean_acc']) > 1 else 0.0),
             'aggregation': aggregation_log,
@@ -630,5 +614,6 @@ class Server:
         
         # Display global loss (already computed together with accuracy)
         print(f"  Global Loss: {global_loss:.4f}")
+        print(f"  Classification Semantic Entropy: {mean_cse:.4f}")
 
         return round_log

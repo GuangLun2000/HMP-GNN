@@ -20,7 +20,10 @@ import main as fl_main
 from visualization import (
     plot_trust_weight_evolution,
     plot_defense_acc_bar,
+    plot_cse_evolution,
+    plot_hallucination_metrics_grouped_bar,
     summarize_run_for_fig_a,
+    summarize_run_multi_metric,
 )
 
 
@@ -74,8 +77,16 @@ def base_config(exp_name: str) -> dict:
             'keep_min': 1,
         },
         'server_similarity_mode': 'pairwise',
-        'use_lagrangian_dual': False,
-        'save_global_checkpoint': False,
+        # V2 M7: CSE is free and always on. PPL requires a decoder-only
+        # backbone; DistilBERT (this demo's default) skips PPL gracefully.
+        'eval_classification_semantic_entropy': True,
+        'eval_perplexity': True,
+        'ppl_num_samples': 200,
+        'ppl_seed': 42,
+        'ppl_max_length': None,
+        # Save checkpoint so PPL eval can run.
+        'save_global_checkpoint': True,
+        'global_checkpoint_subdir': 'global_checkpoint',
         'run_downstream_after_fl': False,
     }
 
@@ -89,6 +100,10 @@ def _cleanup():
 def run_exp(label: str, overrides: dict) -> Path:
     cfg = base_config(overrides['experiment_name'])
     cfg.update(overrides)
+    # Each experiment writes its checkpoint to its own subdirectory to avoid
+    # clobbering earlier runs' checkpoints (and to give PPL eval the right
+    # checkpoint to load).
+    cfg['global_checkpoint_subdir'] = f"global_checkpoint_{cfg['experiment_name']}"
     print(f"\n\n========== DEMO RUN: {label} ==========\n")
     fl_main.main(config_overrides=cfg)
     _cleanup()
@@ -119,26 +134,37 @@ def main():
         }),
     ]
 
-    summaries = {}
+    # Run the 3 experiments and collect per-run result + PPL paths.
+    summaries_fig_a = {}     # legacy Fig A (accuracy bar)
+    summaries_multi = {}     # V2 M7 multi-metric (acc + CSE + PPL)
+    cse_runs = {}            # for Fig F
     for label, overrides in runs:
+        exp_name = overrides['experiment_name']
         res_json = run_exp(label, overrides)
+        ppl_json = Path('results') / f"{exp_name}_eval_ppl.json"
         if not res_json.is_file():
             print(f"[WARN] Missing result file: {res_json}")
             continue
-        summaries[label] = summarize_run_for_fig_a(res_json, default_label=label)
+        summaries_fig_a[label] = summarize_run_for_fig_a(res_json, default_label=label)
+        summaries_multi[label] = summarize_run_multi_metric(
+            res_json,
+            ppl_json_path=ppl_json if ppl_json.is_file() else None,
+            default_label=label,
+        )
+        cse_runs[label] = res_json
 
+    # Fig A: legacy accuracy bar (kept for backward compatibility).
     fig_a_path = Path('results/_v1_demo/figA_defense_bar.png')
-    plot_defense_acc_bar(summaries, save_path=fig_a_path,
-                          metric_key='final_clean_acc',
-                          attack_label='Hallucination (label-flip)')
+    plot_defense_acc_bar(summaries_fig_a, save_path=fig_a_path,
+                         metric_key='final_clean_acc',
+                         attack_label='Hallucination (label-flip)')
 
-    # Fig C from HMP-GAE run
+    # Fig C: trust-weight evolution from the HMP-GAE run.
     hmp_json = Path('results/v1demo_hallu_hmpgae_results.json')
     if hmp_json.is_file():
         with open(hmp_json, 'r', encoding='utf-8') as f:
             data = json.load(f)
         server_log = data.get('results', [])
-        # With num_clients=10 and num_attackers=2, attackers are the last 2.
         num_clients = data.get('config', {}).get('num_clients', 10)
         num_attackers = data.get('config', {}).get('num_attackers', 2)
         attacker_ids = list(range(num_clients - num_attackers, num_clients))
@@ -149,9 +175,28 @@ def main():
             title_suffix=f'Hallu N={num_clients}',
         )
 
+    # Fig E (V2 M7): three-panel Accuracy / CSE / PPL grouped bar.
+    plot_hallucination_metrics_grouped_bar(
+        summaries_multi,
+        save_path=Path('results/_v1_demo/figE_metrics_grouped.png'),
+        attack_label='Hallucination (label-flip)',
+    )
+
+    # Fig F (V2 M7): per-round CSE evolution.
+    plot_cse_evolution(
+        cse_runs,
+        save_path=Path('results/_v1_demo/figF_cse_evolution.png'),
+        title_suffix=f'N={base_config("")["num_clients"]}',
+    )
+
     print("\n==== Summaries ====")
-    for label, s in summaries.items():
-        print(f"  {label}: final_acc={s['final_clean_acc']:.4f}, best={s['best_clean_acc']:.4f}")
+    for label, s in summaries_multi.items():
+        acc = s.get('final_clean_acc', 0.0)
+        cse = s.get('mean_cse')
+        ppl = s.get('ppl')
+        cse_str = f'{cse:.4f}' if cse is not None else 'N/A'
+        ppl_str = f'{ppl:.2f}' if ppl is not None else 'N/A (encoder-only)'
+        print(f"  {label}:  acc={acc:.4f}  mean_cse={cse_str}  ppl={ppl_str}")
 
 
 if __name__ == '__main__':

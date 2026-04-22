@@ -1,6 +1,10 @@
 .DS_Store
 data/.DS_Store
-/__pycache__
-.DS_Store
-.DS_Store
+__pycache__/
+.ipynb_checkpoints/
 /plan
+
+# User-generated experiment outputs (figures, CSVs, JSONs, checkpoints).
+# Re-created by `python _v1_demo_run.py` / `python _v1_seed_runs.py`.
+results/*
+!results/.gitkeep
