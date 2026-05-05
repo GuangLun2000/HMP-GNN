@@ -7,3 +7,4 @@ __pycache__/
 # Re-created by `python _v1_demo_run.py` / `python _v1_seed_runs.py`.
 results/*
 !results/.gitkeep
+.DS_Store
