@@ -23,6 +23,9 @@ def _build_checkpoint_metadata(config: Dict[str, Any]) -> Dict[str, Any]:
         "architecture": get_model_architecture(model_name),
         "experiment_name": config.get("experiment_name", "experiment"),
         "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        # Used by evaluation_hallucination.compute_test_ppl when CLI omits --dataset
+        "dataset": str(config.get("dataset", "ag_news")).lower(),
+        "max_length": int(config.get("max_length", 128)),
     }
     if use_lora:
         meta["lora_r"] = config.get("lora_r", 16)

@@ -206,6 +206,8 @@ def setup_experiment(config):
         defense_method=config.get('defense_method', 'fedavg'),
         defense_config=config.get('defense_config', None),
         num_clients=config['num_clients'],
+        compute_classification_semantic_entropy=config.get(
+            'eval_classification_semantic_entropy', True),
     )
 
     # 6. Create Clients
@@ -515,7 +517,7 @@ def run_experiment(config):
             progressive_metrics['clean_acc'].append(round_log['clean_accuracy'])
             progressive_metrics['acc_diff'].append(round_log.get('acc_diff', 0.0))
             progressive_metrics['agg_update_norm'].append(round_log['aggregation'].get('aggregated_update_norm', 0.0))
-            progressive_metrics['cse'].append(round_log.get('classification_semantic_entropy', 0.0))
+            progressive_metrics['cse'].append(round_log.get('classification_semantic_entropy'))
             
             # Memory cleanup after each round
             gc.collect()
@@ -878,7 +880,7 @@ def main(config_overrides: Optional[Dict] = None):
         # ========== Federated Learning Setup ==========
         'num_clients': 10,  # Total number of federated learning clients (int)
         'num_attackers': 2,  # Number of attacker clients (int, must be < num_clients)
-        'num_rounds': 10,    # Total number of federated learning rounds (int)
+        'num_rounds': 50,    # Total number of federated learning rounds (int)
 
         # ========== Training Hyperparameters ==========
         'client_lr': 5e-5,   # Learning rate for local client training (float)
@@ -938,7 +940,7 @@ def main(config_overrides: Optional[Dict] = None):
         # 'model_name': 'gpt2',                      # GPT-2 124M — stable decoder baseline
         # 'model_name': 'EleutherAI/pythia-160m',    # Pythia-160M (may need grad_clip_norm=0.5)
         # 'model_name': 'facebook/opt-125m',         # OPT-125M (Meta)
-        'model_name': 'Qwen/Qwen2.5-0.5B-Instruct',  # Qwen2.5-0.5B ~494M (Alibaba, LLaMA-style arch, Apache 2.0) — use BASE for fine-tuning
+        'model_name': 'Qwen/Qwen2.5-0.5B',  # Qwen2.5-0.5B ~494M (Alibaba, LLaMA-style arch, Apache 2.0) — use BASE for fine-tuning
         # num_labels and max_length: set above in Dataset Configuration based on chosen dataset
         
 

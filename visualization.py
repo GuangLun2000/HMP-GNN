@@ -1035,9 +1035,10 @@ def summarize_run_multi_metric(results_json_path,
         summary['final_clean_acc'] = float(accs[-1])
         summary['best_clean_acc'] = float(max(accs))
     cse = pm.get('cse', [])
-    if cse:
-        summary['final_cse'] = float(cse[-1])
-        summary['mean_cse'] = float(sum(cse) / len(cse))
+    cse_nums = [float(x) for x in cse if isinstance(x, (int, float)) and not isinstance(x, bool)]
+    if cse_nums:
+        summary['final_cse'] = float(cse_nums[-1])
+        summary['mean_cse'] = float(sum(cse_nums) / len(cse_nums))
 
     if ppl_json_path is not None:
         q = Path(ppl_json_path)
@@ -1074,14 +1075,22 @@ def plot_cse_evolution(runs: Dict[str, Any], save_path,
             with open(p, 'r', encoding='utf-8') as f:
                 d = json.load(f)
             pm = d.get('progressive_metrics', {})
+            rs = list(pm.get('rounds', []))
+            cs = list(pm.get('cse', []))
+            pairs = [(r, c) for r, c in zip(rs, cs)
+                       if c is not None and isinstance(c, (int, float)) and not isinstance(c, bool)]
             resolved[label] = {
-                'rounds': list(pm.get('rounds', [])),
-                'cse': list(pm.get('cse', [])),
+                'rounds': [p[0] for p in pairs],
+                'cse': [float(p[1]) for p in pairs],
             }
         elif isinstance(val, dict):
+            rs = list(val.get('rounds', []))
+            cs = list(val.get('cse', []))
+            pairs = [(r, c) for r, c in zip(rs, cs)
+                       if c is not None and isinstance(c, (int, float)) and not isinstance(c, bool)]
             resolved[label] = {
-                'rounds': list(val.get('rounds', [])),
-                'cse': list(val.get('cse', [])),
+                'rounds': [p[0] for p in pairs],
+                'cse': [float(p[1]) for p in pairs],
             }
 
     # Drop empty runs.

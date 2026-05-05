@@ -221,7 +221,9 @@ def compute_test_ppl(
         }
 
     # Effective max_length matches the FL training setting by default.
-    eff_max_length = int(max_length if max_length is not None else 128)
+    eff_max_length = int(
+        max_length if max_length is not None else int(meta.get("max_length", 128))
+    )
 
     # Build AutoModelForCausalLM and transfer fine-tuned backbone in.
     print(f"[PPL] Building AutoModelForCausalLM(base={model_name}) and transferring backbone...")

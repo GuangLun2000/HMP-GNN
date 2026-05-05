@@ -18,7 +18,8 @@ class Server:
                 similarity_mode='pairwise',
                 defense_method: str = 'fedavg',
                 defense_config: Optional[Dict[str, Any]] = None,
-                num_clients: Optional[int] = None):
+                num_clients: Optional[int] = None,
+                compute_classification_semantic_entropy: bool = True):
         self.global_model = copy.deepcopy(global_model)
         self.test_loader = test_loader
         self.total_rounds = total_rounds
@@ -52,6 +53,8 @@ class Server:
         )
         # Track the round currently being aggregated (set in run_round).
         self._current_round = 0
+        self.compute_classification_semantic_entropy = bool(
+            compute_classification_semantic_entropy)
 
         # Track historical data
         self.history = {
@@ -405,13 +408,14 @@ class Server:
         accuracy, _, _ = self.evaluate_with_loss()
         return accuracy
 
-    def evaluate_with_loss(self) -> Tuple[float, float, float]:
+    def evaluate_with_loss(self) -> Tuple[float, float, Optional[float]]:
         """
         Evaluate the global model's performance in a single pass and also
         compute the Classification Semantic Entropy (CSE) on the SeqCLS head.
 
         Returns:
-            Tuple of (clean_accuracy, global_loss, classification_semantic_entropy).
+            Tuple of (clean_accuracy, global_loss, classification_semantic_entropy_or_none).
+            The third value is ``None`` when ``compute_classification_semantic_entropy`` is False.
 
         The CSE is the mean Shannon entropy of the softmax class distribution
         p(y|x) over the test set. Lower = more confident predictions; under a
@@ -426,6 +430,7 @@ class Server:
         total = 0
         total_loss = 0.0
         total_cse = 0.0
+        do_cse = self.compute_classification_semantic_entropy
 
         with torch.no_grad():
             for batch in self.test_loader:
@@ -444,17 +449,22 @@ class Server:
                 loss = F.cross_entropy(outputs, labels, reduction='sum')
                 total_loss += loss.item()
 
-                # Classification Semantic Entropy (per-sample Shannon entropy,
-                # summed here and averaged at the end).
-                # Use log_softmax for numerical stability.
-                log_probs = F.log_softmax(outputs, dim=1)
-                probs = log_probs.exp()
-                batch_cse = -(probs * log_probs).sum(dim=1)  # (B,)
-                total_cse += batch_cse.sum().item()
+                if do_cse:
+                    # Classification Semantic Entropy (per-sample Shannon entropy,
+                    # summed here and averaged at the end).
+                    # Use log_softmax for numerical stability.
+                    log_probs = F.log_softmax(outputs, dim=1)
+                    probs = log_probs.exp()
+                    batch_cse = -(probs * log_probs).sum(dim=1)  # (B,)
+                    total_cse += batch_cse.sum().item()
 
         clean_accuracy = correct / total if total > 0 else 0.0
         avg_loss = total_loss / total if total > 0 else 0.0
-        mean_cse = total_cse / total if total > 0 else 0.0
+        mean_cse: Optional[float]
+        if do_cse:
+            mean_cse = total_cse / total if total > 0 else 0.0
+        else:
+            mean_cse = None
 
         # Record historical metrics.
         self.history['clean_acc'].append(clean_accuracy)
@@ -614,6 +624,9 @@ class Server:
         
         # Display global loss (already computed together with accuracy)
         print(f"  Global Loss: {global_loss:.4f}")
-        print(f"  Classification Semantic Entropy: {mean_cse:.4f}")
+        if mean_cse is not None:
+            print(f"  Classification Semantic Entropy: {mean_cse:.4f}")
+        else:
+            print("  Classification Semantic Entropy: (disabled via config)")
 
         return round_log
