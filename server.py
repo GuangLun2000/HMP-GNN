@@ -380,14 +380,14 @@ class Server:
                 # Use global test loader for fair comparison (same test set for all clients)
                 for batch in self.test_loader:
                     input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
-                
-                outputs = client.model(input_ids, attention_mask)
-                predictions = torch.argmax(outputs, dim=1)
-                
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    labels = batch['labels'].to(self.device)
+
+                    outputs = client.model(input_ids, attention_mask)
+                    predictions = torch.argmax(outputs, dim=1)
+
+                    correct += (predictions == labels).sum().item()
+                    total += labels.size(0)
         
             accuracy = correct / total if total > 0 else 0.0
         finally:
