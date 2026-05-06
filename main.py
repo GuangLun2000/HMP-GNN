@@ -917,7 +917,7 @@ def main(config_overrides: Optional[Dict] = None):
         # For V1 first experiment we use IID to isolate the defense effect from data heterogeneity noise.
         # Switch to 'non-iid' with dirichlet_alpha in [0.3, 1.0] once baseline numbers are stable.
         'data_distribution': 'iid',      # 'iid' uniform, 'non-iid' Dirichlet-heterogeneous
-        'dirichlet_alpha': 0.3,          # Only used when data_distribution='non-iid'. Lower = more heterogeneous.
+        'dirichlet_alpha': 0.5,          # Only used when data_distribution='non-iid'. Lower = more heterogeneous.
         # 'dataset_size_limit': None,  # Limit dataset size (None = full dataset). AG News: ~120K; IMDB: 25K; DBpedia: 560K; Yahoo Answers: 1.4M
         'dataset_size_limit': 20000,  # Limit for faster experimentation. When set: train ≤ limit, test ≤ limit × 0.15 (same rule for all datasets)
 
